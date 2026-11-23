@@ -492,7 +492,7 @@ fn run_cli(
                 command.args([
                     "--safe-mode",
                     "--setting-sources",
-                    "",
+                    "user",
                     "--settings",
                     r#"{"disableAllHooks":true}"#,
                     "--strict-mcp-config",
@@ -548,6 +548,9 @@ fn run_cli(
         }
         if let Some(stream) = &mut stream {
             stream.poll();
+            if workspace.is_none() && stream.reconnect_expired() {
+                return Err("codex_network".into());
+            }
         }
         if start.elapsed() >= timeout {
             return Err(if workspace.is_some() {

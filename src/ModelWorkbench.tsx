@@ -189,13 +189,15 @@ export default function ModelWorkbench({ profiles, changed, deliver, openArtifac
       {editor && <div className="extension-form">
         {problem && <Alert type="error" showIcon title={problem} />}
         <label>{zh ? '名称' : 'Name'}<Input value={editor.name} maxLength={80} onChange={event => setEditor({ ...editor, name: event.target.value })} /></label>
-        <label>{zh ? '接口协议' : 'API protocol'}<Select value={editor.kind} options={[{ value: 'openai', label: zh ? 'OpenAI 兼容' : 'OpenAI compatible' }, { value: 'anthropic', label: 'Anthropic' }]}
+        <label>{zh ? '接口协议' : 'API protocol'}<Select value={editor.kind} options={[{ value: 'openai', label: zh ? 'OpenAI 兼容' : 'OpenAI compatible' }, { value: 'anthropic', label: 'Anthropic Messages' }]}
           onChange={value => setEditor({ ...editor, kind: value, baseUrl: value === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1' })} /></label>
-        <label>API URL<Input value={editor.baseUrl} onChange={event => setEditor({ ...editor, baseUrl: event.target.value })} /></label>
+        <label>API URL<Input value={editor.baseUrl} onChange={event => setEditor({ ...editor, baseUrl: event.target.value })} />
+          <small className="muted">{zh ? '填写供应商的 API 基址，应用会追加' : 'Use the provider’s base URL. The app appends'} <code>{editor.kind === 'anthropic' ? '/messages' : '/chat/completions'}</code></small></label>
         <label>API Key<Input.Password autoComplete="new-password" value={key} placeholder={editor.hasKey ? zh ? '留空保留现有密钥' : 'Leave empty to keep the current key' : ''}
           onChange={event => setKey(event.target.value)} /></label>
         {models.filter((_, index) => editor.kind === 'openai' || index === 0).map((field, index) => <label key={field}>{fieldNames[index]}
-          <Input value={editor[field] ?? ''} maxLength={160} onChange={event => setEditor({ ...editor, [field]: event.target.value })} /></label>)}
+          <Input value={editor[field] ?? ''} maxLength={160} placeholder={zh ? '供应商提供的模型 ID' : 'Model ID from the provider'}
+            onChange={event => setEditor({ ...editor, [field]: event.target.value })} /></label>)}
       </div>}
     </Modal>
   </div>;

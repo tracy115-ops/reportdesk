@@ -8,13 +8,17 @@ type ToolActivity = Extract<AgentEvent, { kind: 'tool' }>;
 export interface AgentRunProgress {
   text: string;
   tools: ToolActivity[];
+  connection?: 'waiting' | 'retrying';
 }
 
 export function addAgentEvents(previous: AgentRunProgress, events: AgentEvent[]): AgentRunProgress {
   let text = previous.text;
+  let connection = previous.connection;
   const tools = new Map(previous.tools.map(item => [item.id, item]));
   for (const event of events) {
-    if (event.kind === 'text') {
+    if (event.kind === 'connection') {
+      connection = event.retrying ? 'retrying' : 'waiting';
+    } else if (event.kind === 'text') {
       text = (event.replace ? event.text : text + event.text).slice(0, 50_000);
     } else if (event.kind === 'tool') {
       const current = tools.get(event.id);
@@ -28,7 +32,7 @@ export function addAgentEvents(previous: AgentRunProgress, events: AgentEvent[])
       if (current) tools.set(event.id, { ...current, state: event.failed ? 'failed' : 'done' });
     }
   }
-  return { text, tools: [...tools.values()].slice(-24) };
+  return { text, connection, tools: [...tools.values()].slice(-24) };
 }
 
 const stateIcons = { running: ClockCircleOutlined, done: CheckCircleOutlined, failed: ExclamationCircleOutlined };

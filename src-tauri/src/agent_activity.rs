@@ -1,12 +1,20 @@
 use crate::codex::AgentEngine;
 use serde::Serialize;
 use serde_json::Value;
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::File,
+    io::Read,
+    path::Path,
+    time::{Duration, Instant},
+};
 use tauri::ipc::Channel;
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AgentEvent {
+    Connection {
+        retrying: bool,
+    },
     Text {
         text: String,
         replace: bool,
@@ -32,6 +40,7 @@ pub struct AgentStream<'a> {
     skipping: bool,
     claude_result: Option<Vec<u8>>,
     new_message: bool,
+    reconnect_since: Option<Instant>,
 }
 
 const MAX_LINE: usize = 1024 * 1024;
@@ -53,6 +62,7 @@ impl<'a> AgentStream<'a> {
             skipping: false,
             claude_result: None,
             new_message: true,
+            reconnect_since: None,
         }
     }
 
@@ -114,8 +124,26 @@ impl<'a> AgentStream<'a> {
         self.line.clear();
     }
 
-    fn codex_event(&self, value: &Value, events: &mut Vec<AgentEvent>) {
+    pub fn reconnect_expired(&self) -> bool {
+        self.reconnect_since
+            .is_some_and(|since| since.elapsed() >= Duration::from_secs(12))
+    }
+
+    fn codex_event(&mut self, value: &Value, events: &mut Vec<AgentEvent>) {
         let kind = value["type"].as_str().unwrap_or_default();
+        if kind == "turn.started" {
+            events.push(AgentEvent::Connection { retrying: false });
+            return;
+        }
+        if kind == "error"
+            && value["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Reconnecting"))
+        {
+            self.reconnect_since.get_or_insert_with(Instant::now);
+            events.push(AgentEvent::Connection { retrying: true });
+            return;
+        }
         if !matches!(kind, "item.started" | "item.updated" | "item.completed") {
             return;
         }
@@ -123,6 +151,9 @@ impl<'a> AgentStream<'a> {
         let Some(id) = item["id"].as_str() else {
             return;
         };
+        if self.reconnect_since.take().is_some() {
+            events.push(AgentEvent::Connection { retrying: false });
+        }
         let state = if kind != "item.completed" {
             "running"
         } else if item["status"].as_str() == Some("failed")
@@ -161,6 +192,9 @@ impl<'a> AgentStream<'a> {
 
     fn claude_event(&mut self, value: &Value, events: &mut Vec<AgentEvent>) {
         match value["type"].as_str() {
+            Some("system") if value["subtype"] == "init" => {
+                events.push(AgentEvent::Connection { retrying: false });
+            }
             Some("stream_event") => {
                 let event = &value["event"];
                 match event["type"].as_str() {

@@ -195,6 +195,7 @@ export interface AgentWorkspaceChanges {
 }
 export interface AgentReply { text?: string; deniedTools?: number; changes?: AgentWorkspaceChanges; error?: string }
 export type AgentEvent =
+  | { kind: 'connection'; retrying: boolean }
   | { kind: 'text'; text: string; replace: boolean }
   | { kind: 'tool'; id: string; action: 'command' | 'read' | 'write' | 'search' | 'mcp' | 'tool'; target: string; state: 'running' | 'done' | 'failed' }
   | { kind: 'finished'; id: string; failed: boolean };

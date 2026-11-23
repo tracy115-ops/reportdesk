@@ -719,6 +719,12 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
   const failure = task.status === 'failed' || task.status === 'interrupted';
   const shownRequest = task.submittedRequest;
   const engineCopy = { engine: engineName };
+  let responseStatus = workspace ? 'agentToolsRunning' : 'working';
+  if (format === 'answer') {
+    if (runProgress?.connection === 'retrying') responseStatus = 'agentReconnecting';
+    else if (!workspace) responseStatus = runProgress?.text ? 'assistantReplying'
+      : nativeEngine && !runProgress?.connection ? 'agentStarting' : 'agentWaitingReply';
+  }
   const engineState = engineStatus ?? 'codex_checking';
   const engineReady = engineState === 'codex_ready';
   const readyText = nativeDesktop ? t(engineState, engineCopy) : t('assistantOffline');
@@ -896,7 +902,7 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
         </article>}
       </>}
       {locked && <TaskProgress since={running ? started : undefined} label={t(creating || phase === 'files' && running
-        ? 'buildingFiles' : stopping ? 'agentStopping' : saving ? 'assistantSavingDraft' : phase === 'retrieve' && running ? 'assistant_rag_searching' : workspace ? 'agentToolsRunning' : format === 'answer' ? 'assistantReplying' : 'working')} />}
+        ? 'buildingFiles' : stopping ? 'agentStopping' : saving ? 'assistantSavingDraft' : phase === 'retrieve' && running ? 'assistant_rag_searching' : responseStatus, engineCopy)} />}
     </section>}
     <div className="assistant-panel">
       {dataset && <section className="assistant-dataset-context" aria-label={t('assistantDatasetLabel')}>
@@ -917,7 +923,7 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
       {task.status === 'interrupted' && <Alert type="info" showIcon title={t('interruptedTask')} />}
       {task.status === 'failed' && <Alert type={task.error === 'codex_cancelled' ? 'info' : 'error'} showIcon
         title={task.error === 'codex_cancelled' ? t('codexStopped') : t(task.error ?? 'codex_failed', { ...engineCopy, defaultValue: t('codex_failed', engineCopy) })}
-        action={task.error === 'codex_auth' || task.error === 'codex_missing' || task.error === 'codex_version'
+        action={task.error === 'codex_auth' || task.error === 'codex_missing' || task.error === 'codex_version' || task.error === 'codex_network'
           ? <Button size="small" onClick={showAgentSettings}>{t('assistantConnection', engineCopy)}</Button> : undefined} />}
       {task.status === 'failed' && <AgentFileChanges changes={task.failedChanges} />}
       <section className="assistant-composer" aria-label={t('assistantMessage')}>
