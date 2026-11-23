@@ -40,6 +40,27 @@ export function configuredModels(profile: ProviderProfile): string[] {
   return profile.textModels?.length ? profile.textModels : profile.textModel ? [profile.textModel] : [];
 }
 
+const chatRoutes = { openai: '/chat/completions', anthropic: '/messages' } as const;
+
+export function providerApiAddress(profile: ProviderProfile, saved?: ProviderProfile) {
+  let url: URL;
+  try { url = new URL(profile.baseUrl.trim()); }
+  catch { return undefined; }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.href.includes('?') || url.href.includes('#')) {
+    return undefined;
+  }
+  const chatRoute = chatRoutes[profile.kind];
+  const savedBase = saved?.kind === profile.kind ? saved.baseUrl : undefined;
+  const inputBase = url.href.replace(/\/+$/u, '');
+  if (inputBase !== savedBase) {
+    const path = url.pathname.replace(/\/+$/u, '');
+    // A pasted chat endpoint also allows gateways that serve API routes directly at the root.
+    url.pathname = path.endsWith(chatRoute) ? path.slice(0, -chatRoute.length) : path || '/v1';
+  }
+  const baseUrl = url.href.replace(/\/+$/u, '');
+  return { baseUrl, chatUrl: baseUrl + chatRoute, http: url.protocol === 'http:' };
+}
+
 export type MediaKind = 'png' | 'mp3' | 'mp4';
 type MediaAsset = { mime: string; data: string };
 export type VideoStatus = { id: string; status: string; progress?: number };

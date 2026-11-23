@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { errorCode, nativeDesktop } from './desktop';
 import type { NewArtifact } from './office';
-import { configuredModels, discoverProviderModels, providerMedia, removeProvider, saveProvider, startVideo, testProvider, videoStatus } from './provider-client';
+import { configuredModels, discoverProviderModels, providerApiAddress, providerMedia, removeProvider, saveProvider, startVideo, testProvider, videoStatus } from './provider-client';
 import type { MediaKind, ProviderProfile } from './provider-client';
 import { readLocal, writeLocal } from './storage';
 import './extension-workbench.css';
@@ -19,8 +19,9 @@ interface Props {
 }
 
 const extraModels = ['embeddingModel', 'imageModel', 'ttsModel', 'videoModel'] as const;
+const officialUrls = { openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com/v1' } as const;
 const newProfile = (): ProviderProfile => ({
-  id: crypto.randomUUID(), name: '', kind: 'openai', baseUrl: 'https://api.openai.com/v1',
+  id: crypto.randomUUID(), name: '', kind: 'openai', baseUrl: officialUrls.openai,
 });
 const pending = (status: string) => !['completed', 'succeeded', 'failed', 'cancelled', 'canceled', 'expired'].includes(status);
 
@@ -46,6 +47,7 @@ export default function ModelWorkbench({ profiles, changed, deliver, openArtifac
   useEffect(() => { deliverCurrent.current = deliver; }, [deliver]);
   const fieldNames = zh ? ['向量模型', '图像模型', '语音模型', '视频模型'] :
     ['Embedding model', 'Image model', 'Speech model', 'Video model'];
+  const apiAddress = editor && providerApiAddress(editor, profiles.find(item => item.id === editor.id));
   const selectedModels = editor ? configuredModels(editor) : [];
   const catalogOptions = [...new Set([...catalog, ...selectedModels])].map(value => ({ value, label: value }));
   const modelField = ({ png: 'imageModel', mp3: 'ttsModel', mp4: 'videoModel' } as const)[kind];
@@ -120,7 +122,8 @@ export default function ModelWorkbench({ profiles, changed, deliver, openArtifac
     setFetchingModels(true);
     setProblem('');
     try {
-      const ids = await discoverProviderModels(editor, key.trim() ? key : undefined);
+      const profile = apiAddress ? { ...editor, baseUrl: apiAddress.baseUrl } : editor;
+      const ids = await discoverProviderModels(profile, key.trim() ? key : undefined);
       if (catalogRequest.current !== request) return;
       setCatalog(ids);
       if (!ids.length) message.info(t('providerCatalogEmpty'));
@@ -134,7 +137,7 @@ export default function ModelWorkbench({ profiles, changed, deliver, openArtifac
   function store() {
     if (!editor?.name.trim() || !editor.baseUrl.trim()) return;
     void operation(async () => {
-      const profile = { ...editor, name: editor.name.trim(), baseUrl: editor.baseUrl.trim() };
+      const profile = { ...editor, name: editor.name.trim(), baseUrl: apiAddress?.baseUrl ?? editor.baseUrl.trim() };
       for (const field of extraModels) {
         profile[field] = profile.kind === 'anthropic' ? undefined : profile[field]?.trim() || undefined;
       }
@@ -176,7 +179,7 @@ export default function ModelWorkbench({ profiles, changed, deliver, openArtifac
         <Button type="primary" icon={<PlusOutlined />} disabled={!nativeDesktop || busy} onClick={() => edit(newProfile())}>{zh ? '添加供应商' : 'Add provider'}</Button>}
     </div>
     {!nativeDesktop && <Alert showIcon type="info" title={zh ? '在桌面版连接模型' : 'Connect model providers in the desktop app'} />}
-    {problem && <Alert className="extension-alert" type="error" showIcon title={problem} />}
+    {problem && !editor && <Alert className="extension-alert" type="error" showIcon title={problem} />}
     {media ? <>
       <section className="panel extension-panel">
         <Segmented<MediaKind> value={kind} onChange={setKind} disabled={busy} options={[
@@ -225,12 +228,18 @@ export default function ModelWorkbench({ profiles, changed, deliver, openArtifac
       {editor && <div className="extension-form">
         {problem && <Alert type="error" showIcon title={problem} />}
         <label>{zh ? '名称' : 'Name'}<Input value={editor.name} maxLength={80} onChange={event => setEditor({ ...editor, name: event.target.value })} /></label>
-        <label>{zh ? '接口协议' : 'API protocol'}<Select value={editor.kind} options={[{ value: 'openai', label: zh ? 'OpenAI 兼容' : 'OpenAI compatible' }, { value: 'anthropic', label: 'Anthropic Messages' }]}
-          onChange={value => { clearCatalog(); setEditor({ ...editor, kind: value, baseUrl: value === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1' }); }} /></label>
+        <label>{zh ? '接口协议' : 'API protocol'}<Select<ProviderProfile['kind']> value={editor.kind} options={[{ value: 'openai', label: zh ? 'OpenAI 兼容' : 'OpenAI compatible' }, { value: 'anthropic', label: 'Anthropic Messages' }]}
+          onChange={value => {
+            clearCatalog();
+            const baseUrl = editor.baseUrl === officialUrls[editor.kind] ? officialUrls[value] : editor.baseUrl;
+            setEditor({ ...editor, kind: value, baseUrl });
+          }} /></label>
         <label>API URL<Input value={editor.baseUrl} onChange={event => { clearCatalog(); setEditor({ ...editor, baseUrl: event.target.value }); }} />
-          <small className="muted">{zh ? '填写供应商的 API 基址，应用会追加' : 'Use the provider’s base URL. The app appends'} <code>{editor.kind === 'anthropic' ? '/messages' : '/chat/completions'}</code></small></label>
+          <small className="muted">{t('providerApiUrlHint')}</small>
+          {apiAddress && <small className="muted provider-request-url">{t('providerChatUrl')} <code>{apiAddress.chatUrl}</code></small>}</label>
         <label>API Key<Input.Password autoComplete="new-password" value={key} placeholder={editor.hasKey ? zh ? '留空保留现有密钥' : 'Leave empty to keep the current key' : ''}
-          onChange={event => { clearCatalog(); setKey(event.target.value); }} /></label>
+          onChange={event => { clearCatalog(); setKey(event.target.value); }} />
+          {apiAddress?.http && <small className="muted">{t('providerPlainHttp')}</small>}</label>
         <div className="provider-models-field">
           <div className="provider-models-heading">
             <label htmlFor="provider-chat-models">{t('providerChatModels')}</label>

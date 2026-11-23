@@ -4,6 +4,7 @@
 .extension-panel > .ant-segmented { justify-self: start; }
 .extension-panel label, .extension-form label { display: grid; gap: 6px; font-size: 13px; }
 .extension-form { display: grid; gap: 10px; }
+.provider-request-url { overflow-wrap: anywhere; }
 .provider-models-field { display: grid; gap: 8px; min-width: 0; }
 .provider-models-heading { display: flex; align-items: center; gap: 8px; }
 .provider-models-heading .ant-btn { margin-inline-start: auto; }

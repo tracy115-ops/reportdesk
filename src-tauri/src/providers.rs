@@ -313,17 +313,7 @@ impl Providers {
             return Err("provider_request");
         }
         let response = status(response)?;
-        let sse = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value
-                    .split(';')
-                    .next()
-                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
-            });
-        if sse {
+        if response_media_type(&response).eq_ignore_ascii_case("text/event-stream") {
             stream_text(response, kind, channel).await
         } else {
             let bytes = read_body(response, JSON_LIMIT, "provider_output").await?;
@@ -389,22 +379,17 @@ fn model(value: &Option<String>) -> ProviderResult<&str> {
     value.as_deref().ok_or("provider_model")
 }
 
-fn loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(Host::Domain("localhost")) => true,
-        Some(Host::Ipv4(value)) => value.is_loopback(),
-        Some(Host::Ipv6(value)) => value.is_loopback(),
-        _ => false,
-    }
-}
-
 fn normalize_base(value: &str) -> ProviderResult<Url> {
     if value.len() > 2048 {
         return Err("provider_url");
     }
     let url = Url::parse(value.trim()).map_err(|_| "provider_url")?;
-    if url.host().is_none()
-        || !(url.scheme() == "https" || (url.scheme() == "http" && loopback(&url)))
+    let supported = match (url.scheme(), url.host()) {
+        ("https", Some(_)) => true,
+        ("http", Some(Host::Ipv4(_) | Host::Ipv6(_) | Host::Domain("localhost"))) => true,
+        _ => false,
+    };
+    if !supported
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -560,20 +545,21 @@ pub async fn provider_models(
                 url,
             )?
             .timeout(Duration::from_secs(15));
-        let answer = read_json(request, JSON_LIMIT).await?;
-        let entries = answer["data"].as_array().ok_or("provider_output")?;
+        let answer = read_catalog(request.send().await.map_err(network_error)?).await?;
         models.extend(
-            entries
+            answer
+                .data
                 .iter()
                 .filter_map(|entry| entry["id"].as_str())
                 .map(str::trim)
                 .filter(|id| valid_model_id(id))
                 .map(str::to_owned),
         );
-        if profile.kind != ProviderKind::Anthropic || answer["has_more"] != true {
+        if profile.kind != ProviderKind::Anthropic || answer.has_more != true {
             return Ok(models.into_iter().collect());
         }
-        let cursor = answer["last_id"]
+        let cursor = answer
+            .last_id
             .as_str()
             .filter(|id| valid_model_id(id))
             .ok_or("provider_output")?;
@@ -613,7 +599,7 @@ pub async fn provider_test(
             state.text(probe).await?;
             Ok(())
         }
-        _ => status(response).map(|_| ()),
+        _ => read_catalog(response).await.map(|_| ()),
     }
 }
 
@@ -1010,6 +996,13 @@ fn network_error(error: reqwest::Error) -> &'static str {
 
 fn status(response: Response) -> ProviderResult<Response> {
     match response.status().as_u16() {
+        200..=299
+            if ["text/html", "application/xhtml+xml"]
+                .iter()
+                .any(|mime| response_media_type(&response).eq_ignore_ascii_case(mime)) =>
+        {
+            Err("provider_web_page")
+        }
         200..=299 => Ok(response),
         401 | 403 => Err("provider_auth"),
         404 => Err("provider_endpoint"),
@@ -1017,6 +1010,34 @@ fn status(response: Response) -> ProviderResult<Response> {
         500..=599 => Err("provider_service"),
         _ => Err("provider_request"),
     }
+}
+
+fn response_media_type(response: &Response) -> &str {
+    response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+struct ModelCatalog {
+    data: Vec<Value>,
+    #[serde(default)]
+    has_more: Value,
+    #[serde(default)]
+    last_id: Value,
+}
+
+async fn read_catalog(response: Response) -> ProviderResult<ModelCatalog> {
+    if matches!(response.status().as_u16(), 404 | 405 | 501) {
+        return Err("provider_catalog_unavailable");
+    }
+    let response = status(response)?;
+    let bytes = read_body(response, JSON_LIMIT, "provider_catalog_format").await?;
+    serde_json::from_slice(&bytes).map_err(|_| "provider_catalog_format")
 }
 
 async fn read_json(request: reqwest::RequestBuilder, limit: usize) -> ProviderResult<Value> {
@@ -1255,4 +1276,42 @@ fn credential_blob(data: &[u8], encrypt: bool) -> ProviderResult<Zeroizing<Vec<u
 #[cfg(not(windows))]
 fn credential_blob(_: &[u8], _: bool) -> ProviderResult<Zeroizing<Vec<u8>>> {
     Err("provider_key_store")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_routes_accept_http_ip_addresses_and_custom_paths() {
+        for base in [
+            "http://192.168.1.10:8000/v1",
+            "http://203.0.113.10:9090/api/v1",
+            "http://[2001:db8::10]:8000/v1",
+            "http://localhost:8000",
+            "https://gateway.example/api/v1",
+        ] {
+            assert_eq!(
+                endpoint(base, "models").unwrap().as_str(),
+                format!("{base}/models")
+            );
+            assert_eq!(
+                endpoint(base, "chat/completions").unwrap().as_str(),
+                format!("{base}/chat/completions")
+            );
+        }
+    }
+
+    #[test]
+    fn provider_addresses_reject_credentials_in_urls_and_non_api_schemes() {
+        for base in [
+            "http://gateway.example/v1",
+            "http://alice@192.168.1.10:8000/v1",
+            "http://192.168.1.10:8000/v1?mode=test",
+            "http://192.168.1.10:8000/v1#models",
+            "file:///model-config.json",
+        ] {
+            assert_eq!(normalize_base(base), Err("provider_url"));
+        }
+    }
 }
