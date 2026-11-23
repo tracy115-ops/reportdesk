@@ -8,6 +8,8 @@ mod mcp;
 mod project_preview;
 mod providers;
 mod sources;
+#[cfg(windows)]
+mod windows_proxy;
 
 use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
 

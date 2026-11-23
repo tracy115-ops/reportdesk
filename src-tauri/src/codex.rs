@@ -412,6 +412,8 @@ fn run_cli(
     let errors = dir.path().join("stderr.log");
     let stderr = fs::File::create(&errors).map_err(|_| "codex_failed")?;
     let mut command = quiet_command(exe);
+    #[cfg(windows)]
+    crate::windows_proxy::inherit_system_proxy(&mut command);
     let mut stream = None;
     let mut event_sink = None;
     if let Some(channel) = progress {
@@ -856,7 +858,9 @@ pub fn agent_open_terminal(
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
         let exe = executable(engine).ok_or("codex_missing")?;
-        Command::new(exe)
+        let mut command = Command::new(exe);
+        crate::windows_proxy::inherit_system_proxy(&mut command);
+        command
             .current_dir(folders.resolve(&id)?)
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()

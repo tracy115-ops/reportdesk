@@ -1,6 +1,6 @@
 [package]
 name = "report-desk"
-version = "0.20.1"
+version = "0.20.2"
 description = "Local office workspace"
 edition = "2021"
 
@@ -22,7 +22,7 @@ uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [profile.release]
 strip = true
