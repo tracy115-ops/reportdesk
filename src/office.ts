@@ -69,7 +69,7 @@ export interface AssistantDatasetScope {
   materialIds: string[];
 }
 export type AssistantReference =
-  | { materialIds: string[]; preset?: AssistantPreset }
+  | { materialIds: string[]; preset?: AssistantPreset; retainRequest?: boolean }
   | { evidence: Evidence }
   | { analysis: Evidence }
   | { dataset: AssistantDatasetScope; request?: string; pinned?: Evidence[]; format?: Format };

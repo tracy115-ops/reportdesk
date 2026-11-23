@@ -61,6 +61,8 @@ fn main() {
             browser::browser_bounds,
             browser::browser_action,
             browser::browser_check,
+            browser::browser_capture,
+            browser::save_browser_capture,
             project_preview::preview_html,
             project_preview::preview_pick_folder,
             project_preview::preview_stop,

@@ -1,23 +1,29 @@
-import { Alert, App as AntApp, Button, Modal, Table } from 'antd';
+import { Alert, App as AntApp, Button, DatePicker, Input, Modal, Select, Table } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
-import { CheckCircleOutlined, FileExcelOutlined, FolderOpenOutlined, HistoryOutlined, MobileOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, CheckCircleOutlined, FileExcelOutlined, FolderOpenOutlined, HistoryOutlined, MobileOutlined } from '@ant-design/icons';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import EmbeddedBrowser from './EmbeddedBrowser';
 import type { BrowserQualityReport } from './EmbeddedBrowser';
 import { errorCode, nativeDesktop } from './desktop';
+import type { SourceSelection } from './desktop';
 import type { NewArtifact } from './office';
 import { reportAddress, validationWorkbook } from './validation-report';
 import type { MiniIssue, MiniReport, ValidationReport } from './validation-report';
+import { webMaterialMarkdown } from './web-material';
+import type { BrowserCapture } from './web-material';
 
-export type BrowserIntake = { url: string; key: string };
+export type BrowserIntake = { url: string; key: string; links?: readonly string[] };
 interface Props {
   incoming?: BrowserIntake;
   deliver: (files: NewArtifact[]) => Promise<unknown>;
   openArtifacts: () => void;
+  importMaterials: (selection: SourceSelection) => Promise<string[]>;
+  returnToAssistant: (ids: string[]) => void;
+  locked: boolean;
 }
 
-export default function BrowserWorkbench({ incoming, deliver, openArtifacts }: Props) {
+export default function BrowserWorkbench({ incoming, deliver, openArtifacts, importMaterials, returnToAssistant, locked }: Props) {
   const { t } = useTranslation();
   const { message } = AntApp.useApp();
   const [local, setLocal] = useState<BrowserIntake>();
@@ -27,11 +33,44 @@ export default function BrowserWorkbench({ incoming, deliver, openArtifacts }: P
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<ValidationReport>();
   const saveLock = useRef(false);
+  const [capture, setCapture] = useState<BrowserCapture>();
+  const [captureTitle, setCaptureTitle] = useState('');
+  const [capturePeriod, setCapturePeriod] = useState<[string, string]>();
+  const [capturedIds, setCapturedIds] = useState<string[]>([]);
+  const [savingCapture, setSavingCapture] = useState(false);
+  const captureLock = useRef(false);
   const web = latest?.kind === 'web' ? latest.report : undefined;
   const mini = latest?.kind === 'mini' ? latest.report : undefined;
 
   useEffect(() => { setLocal(undefined); }, [incoming?.key]);
   useEffect(() => () => { void invoke('preview_stop').catch(() => undefined); }, []);
+
+  function reviewCapture(page: BrowserCapture) {
+    setCaptureTitle(page.title);
+    setCapturePeriod(undefined);
+    setCapture(page);
+  }
+
+  async function saveCapture() {
+    if (!capture || !captureTitle.trim() || captureLock.current || locked) return;
+    captureLock.current = true;
+    setSavingCapture(true);
+    try {
+      const selection = await invoke<SourceSelection>('save_browser_capture', {
+        title: captureTitle.trim(),
+        markdown: webMaterialMarkdown(capture, captureTitle, capturePeriod),
+      });
+      const ids = await importMaterials(selection);
+      setCapturedIds(current => [...new Set([...current, ...ids])]);
+      setCapture(undefined);
+      message.success(t('browserCaptureSaved'));
+    } catch (error) {
+      message.error(t(errorCode(error, 'file_access'), { defaultValue: t('file_access') }));
+    } finally {
+      captureLock.current = false;
+      setSavingCapture(false);
+    }
+  }
 
   function showReport(report: ValidationReport) {
     setLatest(report);
@@ -81,13 +120,45 @@ export default function BrowserWorkbench({ incoming, deliver, openArtifacts }: P
   }
 
   return <section className="browser-workbench">
-    <div className="browser-project-actions">
-      <Button icon={<FolderOpenOutlined />} disabled={!nativeDesktop || busy} onClick={() => void loadProject('web')}>{t('preview_local_web')}</Button>
-      <Button icon={<CheckCircleOutlined />} disabled={!nativeDesktop || busy} onClick={() => void checkMiniProgram()}>{t('preview_check_mini_program')}</Button>
-      <Button icon={<MobileOutlined />} disabled={!nativeDesktop || busy} onClick={() => void loadProject('mini')}>{t('preview_mini_program')}</Button>
-      {latest && <Button icon={<HistoryOutlined />} onClick={() => setReportOpen(true)}>{t('validation_latest')}</Button>}
+    <div className="browser-workbench-top">
+      <div className="browser-project-actions">
+        {!incoming?.links && <>
+          <Button icon={<FolderOpenOutlined />} disabled={!nativeDesktop || busy} onClick={() => void loadProject('web')}>{t('preview_local_web')}</Button>
+          <Button icon={<CheckCircleOutlined />} disabled={!nativeDesktop || busy} onClick={() => void checkMiniProgram()}>{t('preview_check_mini_program')}</Button>
+          <Button icon={<MobileOutlined />} disabled={!nativeDesktop || busy} onClick={() => void loadProject('mini')}>{t('preview_mini_program')}</Button>
+          {latest && <Button icon={<HistoryOutlined />} onClick={() => setReportOpen(true)}>{t('validation_latest')}</Button>}
+        </>}
+        {(incoming?.links || capturedIds.length > 0) && <Button
+          className="browser-return-assistant" type={capturedIds.length ? 'primary' : 'default'} icon={<ArrowLeftOutlined />}
+          disabled={locked || savingCapture} onClick={() => returnToAssistant(capturedIds)}>
+          {capturedIds.length ? t('browserCaptureToAssistant', { count: capturedIds.length }) : t('browserReturnAssistant')}
+        </Button>}
+      </div>
+      {incoming?.links && incoming.links.length > 1 && <Select className="browser-link-queue" aria-label={t('browserLinkQueue')}
+        value={local?.url ?? incoming.url} disabled={savingCapture}
+        options={incoming.links.map(url => {
+          const page = new URL(url);
+          return { value: url, label: page.host + page.pathname };
+        })}
+        onChange={url => setLocal({ url, key: crypto.randomUUID() })} />}
     </div>
-    <EmbeddedBrowser intake={local ?? incoming} onQualityReport={showWebReport} />
+    <EmbeddedBrowser intake={local ?? incoming} onQualityReport={showWebReport} onCapture={reviewCapture} />
+    <Modal title={t('browserCaptureTitle')} open={Boolean(capture)} width={720} onCancel={() => { if (!savingCapture) setCapture(undefined); }}
+      okText={t('browserCaptureSave')} cancelText={t('cancel')} onOk={() => void saveCapture()} confirmLoading={savingCapture}
+      okButtonProps={{ disabled: locked || !captureTitle.trim() }}>
+      {capture && <div className="browser-capture-form">
+        <label>{t('browserCaptureName')}<Input value={captureTitle} maxLength={120} disabled={savingCapture}
+          onChange={event => setCaptureTitle(event.target.value)} /></label>
+        <span className="muted browser-capture-url">{capture.url}</span>
+        <label>{t('browserCapturePeriod')}
+          <DatePicker.RangePicker format="YYYY-MM-DD" disabled={savingCapture}
+            onChange={(dates, formatted) => setCapturePeriod(dates ? formatted : undefined)} />
+        </label>
+        <p className="muted">{t(capture.selection ? 'browserCaptureSelection' : 'browserCaptureScope')}</p>
+        {capture.truncated && <Alert type="warning" showIcon title={t('browserCaptureTruncated')} />}
+        <Input.TextArea aria-label={t('browserCapturePreview')} rows={10} readOnly value={capture.text} />
+      </div>}
+    </Modal>
     <Modal title={t(web ? 'validation_web_result' : 'preview_check_mini_program')} open={reportOpen}
       width={760} onCancel={() => { if (!saveLock.current) setReportOpen(false); }} footer={[
         <Button key="close" disabled={saving} onClick={() => setReportOpen(false)}>{t('cancel')}</Button>,

@@ -58,6 +58,12 @@ pub struct Selection {
     skipped: usize,
 }
 
+impl Selection {
+    pub fn has_selection(&self) -> bool {
+        !self.selected_ids.is_empty()
+    }
+}
+
 pub struct Sources {
     file: PathBuf,
     entries: Mutex<Vec<Source>>,

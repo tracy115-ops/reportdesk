@@ -12,6 +12,7 @@ import { assistantConversationTitle, assistantInput, assistantPresets, assistant
 import type { Artifact, AssistantDatasetScope, AssistantDraft, AssistantReference, AssistantTask, AssistantVersion, Format, NewArtifact, OfficeDraft } from './office';
 import { makeSlides, makeWord } from './office-output';
 import { readLocal, writeLocal } from './storage';
+import { linksInRequest } from './web-material';
 import { retrieveAssistantEvidence } from './assistant-retrieval';
 import type { KnowledgeModel } from './knowledge-index';
 import type { AssistantRetrieval } from './office';
@@ -104,6 +105,7 @@ interface Props {
   setRunning: (running: boolean) => void;
   setWriting: (writing: boolean) => void;
   pick: (folder: boolean) => void;
+  openLinks: (urls: string[]) => void;
   previewMaterial: (id: string) => void;
   artifacts: Artifact[];
   deliver: (files: NewArtifact[], group: string) => Promise<Artifact[]>;
@@ -134,7 +136,7 @@ interface Props {
 }
 
 export default function OfficeAssistant({ files, agentBusy, defaultEngine, engineOptions, engineLocked, resolveAgent, prepareEngine, recheckEngine,
-  openAgentSettings, openKnowledge, knowledgeModels = [], running, setRunning, setWriting, pick, previewMaterial,
+  openAgentSettings, openKnowledge, knowledgeModels = [], running, setRunning, setWriting, pick, openLinks, previewMaterial,
   artifacts, deliver, preview, saveFile, exporting, show, reference, clearReference, showSourcesLoading, openCreative,
   newTaskSignal, openLibrary, openArtifacts, openTaskId, clearOpenTask, onTasksChange, runDatasetCommand, datasetCommandBusy, renderTaskContext }: Props) {
   const { t, i18n } = useTranslation();
@@ -144,6 +146,7 @@ export default function OfficeAssistant({ files, agentBusy, defaultEngine, engin
     return resumeTask(saved, defaultEngine);
   });
   const { request, locale, draft, attachments, dataset, agentFolder } = task;
+  const webLinks = nativeDesktop ? linksInRequest(request) : [];
   const agent = resolveAgent(task.engine ?? defaultEngine);
   const { engine, name: engineName, status: engineStatus } = agent;
   const hasCodex = agent.ready && !agentBusy;
@@ -312,7 +315,7 @@ export default function OfficeAssistant({ files, agentBusy, defaultEngine, engin
           const preset = assistantPresets[reference.preset];
           void startTask({ request: t(preset.request), format: preset.format, attachments: next });
         } else if (dataset) {
-          void startTask({ attachments: next });
+          void startTask({ attachments: next, ...(reference.retainRequest && { request, format: task.format, locale }) });
         } else if (next.length !== attachments.length) {
           update({ attachments: next });
           message.success(t('attachmentAdded'));
@@ -1052,6 +1055,8 @@ export default function OfficeAssistant({ files, agentBusy, defaultEngine, engin
           {inlineTaskContext && taskContext && <div className="assistant-task-context is-inline">{taskContext}</div>}
           {commandControl}
           {toolsControl}
+          {webLinks.length > 0 && <Button className="assistant-composer-control" type="text" icon={<LinkOutlined />}
+            disabled={switchingBlocked} onClick={() => openLinks(webLinks)}>{t('browserTaskLinks', { count: webLinks.length })}</Button>}
           {!reportPlan && <div className="assistant-options">
             <Select id="office-format" aria-label={t('output')} value={format} variant="borderless" prefix={format === 'pptx' ? <FilePptOutlined /> : format === 'answer' ? <MessageOutlined /> : <FileWordOutlined />} disabled={locked || Boolean(command?.format)} onChange={(format: Format) => update({ format })}
               options={(['answer', 'docx', 'pptx', 'bundle'] as const).map(item => ({ value: item, label: t(item) }))} />

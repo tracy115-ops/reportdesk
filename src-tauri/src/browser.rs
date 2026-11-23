@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     webview::{NewWindowResponse, WebviewBuilder},
     AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Url, Webview, WebviewUrl,
 };
+use crate::sources::{Selection, Sources};
 
 const PANEL: &str = "office-browser";
 
@@ -267,4 +270,123 @@ pub async fn browser_check(app: AppHandle) -> Result<BrowserQualityReport, Strin
         .map_err(|_| "browser_check_failed")?
         .as_millis() as u64;
     Ok(BrowserQualityReport { page, checked_at })
+}
+
+const CAPTURE_PAGE: &str = r#"
+(() => {
+  if (!document.body || document.readyState === 'loading') return null;
+  const selection = window.getSelection()?.toString().trim() || '';
+  const visible = document.body.innerText.trim();
+  const login = /^login\./i.test(location.hostname) ||
+    /(?:^|\/)(?:login|sign-in|signin|sso-proxy-front)(?:\/|$)/i.test(location.pathname) &&
+    (/(登录|log in|sign in|scan.*code)/i.test(visible.slice(0, 1500)) ||
+      [...document.querySelectorAll('input[type=password]')].some(input => input.getClientRects().length));
+  const text = selection || visible;
+  return { url: location.href, title: document.title.slice(0, 240), login,
+    text: text.slice(0, 42000), selection: Boolean(selection), truncated: text.length > 42000 };
+})()
+"#;
+
+#[derive(Deserialize)]
+struct CapturePage {
+    url: String,
+    title: String,
+    text: String,
+    login: bool,
+    selection: bool,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCapture {
+    url: String,
+    title: String,
+    text: String,
+    captured_at: u64,
+    selection: bool,
+    truncated: bool,
+}
+
+#[tauri::command]
+pub async fn browser_capture(app: AppHandle) -> Result<BrowserCapture, String> {
+    let failed = "browser_capture_failed";
+    let view = app.get_webview(PANEL).ok_or(failed)?;
+    let before = view.url().map_err(|_| failed)?;
+    if !can_browse(&before, app.config().build.dev_url.as_ref()) {
+        return Err(failed.into());
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    view.eval_with_callback(CAPTURE_PAGE, move |value| {
+        let _ = sender.try_send(value);
+    })
+    .map_err(|_| failed)?;
+    let result = tauri::async_runtime::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(5)))
+        .await
+        .map_err(|_| failed)?
+        .map_err(|_| failed)?;
+    if result.len() > 512 * 1024 {
+        return Err(failed.into());
+    }
+    let page: CapturePage = serde_json::from_str(&result).map_err(|_| failed)?;
+    if view.url().map_err(|_| failed)? != before || Url::parse(&page.url).ok().as_ref() != Some(&before) {
+        return Err("browser_capture_changed".into());
+    }
+    if page.login {
+        return Err("browser_capture_login".into());
+    }
+    let text = page.text.trim().to_owned();
+    if text.is_empty() {
+        return Err("browser_capture_empty".into());
+    }
+    let mut url = before;
+    url.set_query(None);
+    url.set_fragment(None);
+    let title = page.title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let captured_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| failed)?
+        .as_millis() as u64;
+    Ok(BrowserCapture {
+        title: if title.is_empty() { url.host_str().unwrap_or("Web page").to_owned() } else { title },
+        url: url.to_string(),
+        text,
+        captured_at,
+        selection: page.selection,
+        truncated: page.truncated,
+    })
+}
+
+#[tauri::command]
+pub async fn save_browser_capture(app: AppHandle, title: String, markdown: String) -> Result<Selection, String> {
+    if markdown.trim().is_empty() || markdown.len() > 512 * 1024 {
+        return Err("browser_capture_failed".into());
+    }
+    let directory = app.path().app_data_dir().map_err(|_| "file_access")?.join("web-materials");
+    tauri::async_runtime::spawn_blocking(move || save_capture_file(&directory, &title, &markdown, &app.state::<Sources>()))
+        .await
+        .map_err(|_| String::from("file_access"))?
+}
+
+fn save_capture_file(directory: &std::path::Path, title: &str, markdown: &str, sources: &Sources) -> Result<Selection, String> {
+    std::fs::create_dir_all(directory).map_err(|_| "file_access")?;
+    let name: String = title.chars()
+        .filter(|ch| !ch.is_control() && !matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+        .take(60)
+        .collect();
+    let name = name.trim_matches([' ', '.']);
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let filename = if name.is_empty() { format!("Web-{}.md", &id[..8]) } else { format!("{}-{}.md", name, &id[..8]) };
+    let path: PathBuf = directory.join(filename);
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|_| "file_access")?;
+    file.write_all(markdown.as_bytes()).map_err(|_| "file_access")?;
+    file.as_file().sync_all().map_err(|_| "file_access")?;
+    file.persist_noclobber(&path).map_err(|_| "file_access")?;
+    match sources.register(vec![path.clone()]) {
+        Ok(selection) if selection.has_selection() => Ok(selection),
+        result => {
+            let _ = std::fs::remove_file(path);
+            Err(result.err().unwrap_or_else(|| "file_access".into()))
+        }
+    }
 }

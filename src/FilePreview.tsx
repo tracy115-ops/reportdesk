@@ -23,6 +23,7 @@ export interface PreviewFile {
   bytes?: () => Promise<ArrayBuffer>;
   open?: () => Promise<void>;
   browse?: () => Promise<void>;
+  browseLabel?: string;
   save?: () => Promise<void>;
   saving?: boolean;
   saveLabel?: string;
@@ -183,7 +184,7 @@ export default function FilePreview({ file, close, error }: { file: PreviewFile;
       {file.browse && <Button icon={<GlobalOutlined />} loading={browsing} onClick={() => {
         setBrowsing(true);
         void file.browse!().catch(error).finally(() => setBrowsing(false));
-      }}>{t('preview_in_browser')}</Button>}
+      }}>{t(file.browseLabel ?? 'preview_in_browser')}</Button>}
       {file.open && <Button icon={<ExportOutlined />} loading={opening} onClick={() => {
         setOpening(true);
         void file.open!().catch(error).finally(() => setOpening(false));

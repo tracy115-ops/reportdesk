@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import MappingDialog from './MappingDialog';
 import ArtifactsView from './ArtifactsView';
 import FilePreview from './FilePreview';
+import { webpageSource } from './web-material';
 import type { PreviewFile } from './FilePreview';
 import MaterialsView from './MaterialsView';
 import DataWorkbench from './DataWorkbench';
@@ -432,8 +433,11 @@ export default function App() {
   const currentPreview = useMemo<PreviewFile | undefined>(() => {
     if (preview?.type === 'material' && previewedMaterial) {
       const item = previewedMaterial.material;
+      const source = item.kind === 'md' && previewedMaterial.parsed?.kind === 'docx'
+        ? webpageSource(previewedMaterial.parsed.paragraphs) : undefined;
       return { title: item.relative, kind: item.kind, parsed: previewedMaterial.parsed, error: previewedMaterial.error, anchor: preview.anchor, audit: preview.audit,
         location: item.path, bytes: previewedSource ? () => readMaterial(previewedSource, item) : undefined,
+        browse: nativeDesktop && source ? async () => openBrowserAddress(source) : undefined, browseLabel: source ? 'browserCaptureOpenSource' : undefined,
         reusePage: item.kind === 'pptx' && previewedSource ? page => reuseSlide({ type: 'material', id: item.id, page }) : undefined,
         attach: previewedMaterial.parsed && !assistantRunning ? () => useAssistant({ materialIds: [item.id] }) : undefined,
         actions: previewedMaterial.parsed && !locked && !toolBusy && !assistantWriting ? materialMenu(previewedMaterial) : undefined,
@@ -462,6 +466,10 @@ export default function App() {
 
   async function openHtmlInBrowser(file: Blob) {
     const url = await invoke<string>('preview_html', { html: await file.text() });
+    openBrowserAddress(url);
+  }
+
+  function openBrowserAddress(url: string) {
     setPreview(undefined);
     setBrowserIntake({ url, key: crypto.randomUUID() });
     setPage('browser');
@@ -734,7 +742,7 @@ export default function App() {
     if (selection.skipped) message.warning(t('skippedImports', { count: selection.skipped }));
     const files = selection.added || (target && selection.selectedIds.length) || (sample && selection.sources.length)
       ? (await realSources(selection.sources))?.loaded : loaded;
-    if (!target || !files) return;
+    if (!files) return [];
     const normalize = (path: string) => path.replaceAll('\\', '/').toLowerCase();
     const materialIds = new Set<string>();
     for (const id of selection.selectedIds) {
@@ -745,13 +753,20 @@ export default function App() {
       }
     }
     if (!materialIds.size) {
-      if (selection.selectedIds.length) message.warning(t('sourceSelectionEmpty'));
-      return;
+      if (target && selection.selectedIds.length) message.warning(t('sourceSelectionEmpty'));
+      return [];
     }
     if (target === 'assistant') useAssistant({ materialIds: [...materialIds] });
     else if (target === 'analysis') useAnalysis([...materialIds]);
     else if (target === 'creative') { setCreativeImported([...materialIds]); setPage('creative'); }
-    else useTool(target, [...materialIds], true);
+    else if (target) useTool(target, [...materialIds], true);
+    return [...materialIds];
+  }
+
+  function openAssistantLinks(links: string[]) {
+    if (!links.length) return;
+    setBrowserIntake({ url: links[0]!, key: crypto.randomUUID(), links });
+    setPage('browser');
   }
 
   async function pick(directory: boolean, target?: ImportTarget) {
@@ -1458,6 +1473,10 @@ export default function App() {
         <div hidden={page !== 'media'}><ModelWorkbench media profiles={providerProfiles} changed={refreshProviders} deliver={deliverArtifacts}
           openArtifacts={() => { setArtifactFilter(undefined); setPage('artifacts'); }} /></div>
         {page === 'browser' && <BrowserWorkbench incoming={browserIntake} deliver={deliverArtifacts}
+          importMaterials={acceptSources} locked={workspaceLocked} returnToAssistant={ids => {
+            if (ids.length) useAssistant({ materialIds: ids, retainRequest: true });
+            else setPage('assistant');
+          }}
           openArtifacts={() => { setArtifactFilter(undefined); setPage('artifacts'); }} />}
         {page === 'mcp' && <McpPanel />}
         <div hidden={page !== 'workflows'}>
@@ -1492,7 +1511,8 @@ export default function App() {
             runDatasetCommand={runAssistantDatasetCommand} datasetCommandBusy={pptLocked}
             openTaskId={openTaskId} clearOpenTask={() => setOpenTaskId(undefined)} onTasksChange={setAssistantTasks}
             reference={assistantReference} clearReference={() => setAssistantReference(undefined)} showSourcesLoading={busy || picking}
-            pick={folder => { if (!locked) void pick(folder, 'assistant'); }} previewMaterial={id => setPreview({ type: 'material', id })}
+            pick={folder => { if (!locked) void pick(folder, 'assistant'); }} openLinks={openAssistantLinks}
+            previewMaterial={id => setPreview({ type: 'material', id })}
             artifacts={artifacts} deliver={deliverArtifacts} preview={id => setPreview({ type: 'artifact', id })}
             saveFile={exportArtifact} exporting={exporting} show={setEvidence}
             openCreative={useCreative} newTaskSignal={newTaskSignal} openLibrary={() => setPage('library')} openArtifacts={() => setPage('artifacts')} />

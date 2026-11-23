@@ -1,9 +1,10 @@
-import { ArrowLeftOutlined, ArrowRightOutlined, CodeOutlined, FileSearchOutlined, GlobalOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, ArrowRightOutlined, CodeOutlined, FileAddOutlined, FileSearchOutlined, GlobalOutlined, ReloadOutlined } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { Alert, Button, Input, InputNumber, Segmented, Tooltip } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { nativeDesktop } from './desktop';
+import { errorCode, nativeDesktop } from './desktop';
+import type { BrowserCapture } from './web-material';
 import './embedded-browser.css';
 
 const browserCopy = {
@@ -76,26 +77,33 @@ function panelBounds(panel: HTMLElement): Bounds | null {
 }
 
 function browserCovered(bounds: Bounds) {
-  return [...document.querySelectorAll('.ant-modal-wrap, .ant-drawer-open, .sidebar-menu:not(.ant-dropdown-hidden)')].some(overlay => {
+  return [...document.querySelectorAll('.ant-modal-wrap, .ant-drawer-open, .sidebar-menu:not(.ant-dropdown-hidden), .ant-select-dropdown:not(.ant-select-dropdown-hidden)')].some(overlay => {
     const { left, right, top, bottom } = overlay.getBoundingClientRect();
     return left < bounds.x + bounds.width && right > bounds.x && top < bounds.y + bounds.height && bottom > bounds.y;
   });
 }
 
-export default function EmbeddedBrowser({ intake, onQualityReport }: { intake?: BrowserIntake; onQualityReport?: (report: BrowserQualityReport) => void }) {
-  const { i18n } = useTranslation();
+export default function EmbeddedBrowser({ intake, onQualityReport, onCapture }: {
+  intake?: BrowserIntake;
+  onQualityReport?: (report: BrowserQualityReport) => void;
+  onCapture?: (capture: BrowserCapture) => void;
+}) {
+  const { t, i18n } = useTranslation();
   const copy = i18n.language.startsWith('zh') ? browserCopy.zh : browserCopy.en;
   const [address, setAddress] = useState('');
   const [opened, setOpened] = useState(false);
   const [location, setLocation] = useState('');
   const [opening, setOpening] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [captureError, setCaptureError] = useState<string>();
   const [error, setError] = useState<'invalid' | 'failed' | 'inspector' | 'checkFailed' | 'checkChanged'>();
   const [viewport, setViewport] = useState<Viewport>('fit');
   const [customWidth, setCustomWidth] = useState<number | null>(520);
   const [visibleSize, setVisibleSize] = useState<{ width: number; height: number }>();
   const panel = useRef<HTMLDivElement>(null);
   const editing = useRef(false);
+  const handledIntake = useRef<string | undefined>(undefined);
   const localPage = Boolean(location && loopback(new URL(location)));
   const viewportWidth = viewport === 'phone' ? 390 : viewport === 'tablet' ? 768 : viewport === 'custom' ? Math.min(1600, Math.max(240, customWidth ?? 520)) : undefined;
 
@@ -126,10 +134,14 @@ export default function EmbeddedBrowser({ intake, onQualityReport }: { intake?: 
   }, [opened]);
 
   useEffect(() => {
-    if (!intake?.url) return;
-    const timer = window.setTimeout(() => { void openAddress(intake.url); });
+    const key = intake?.key ?? intake?.url;
+    if (!intake?.url || key === handledIntake.current || opening || checking || capturing) return;
+    const timer = window.setTimeout(() => {
+      handledIntake.current = key;
+      void openAddress(intake.url);
+    });
     return () => window.clearTimeout(timer);
-  }, [intake?.url, intake?.key]);
+  }, [intake?.url, intake?.key, opening, checking, capturing]);
 
   useEffect(() => {
     const surface = panel.current;
@@ -165,13 +177,14 @@ export default function EmbeddedBrowser({ intake, onQualityReport }: { intake?: 
   }, [opened]);
 
   async function openAddress(value = address) {
-    if (!nativeDesktop || opening || checking || !panel.current) return;
+    if (!nativeDesktop || opening || checking || capturing || !panel.current) return;
     const url = normalizeAddress(value);
     if (!url) { setError('invalid'); return; }
     const bounds = panelBounds(panel.current);
     if (!bounds) return;
     setOpening(true);
     setError(undefined);
+    setCaptureError(undefined);
     editing.current = false;
     setAddress(url);
     try {
@@ -182,9 +195,10 @@ export default function EmbeddedBrowser({ intake, onQualityReport }: { intake?: 
   }
 
   function go(action: BrowserAction) {
-    if (!opened || opening || checking) return;
+    if (!opened || opening || checking || capturing) return;
     editing.current = false;
     setError(undefined);
+    setCaptureError(undefined);
     void runBrowserCommand('browser_action', { action }).catch(() => setError(action === 'inspect' ? 'inspector' : 'failed'));
   }
 
@@ -205,17 +219,31 @@ export default function EmbeddedBrowser({ intake, onQualityReport }: { intake?: 
     }
   }
 
+  async function capturePage() {
+    if (!onCapture || !opened || opening || checking || capturing) return;
+    setCapturing(true);
+    setCaptureError(undefined);
+    try {
+      const capture = await runBrowserCommand<BrowserCapture>('browser_capture', {});
+      if (panel.current) onCapture(capture);
+    } catch (problem) {
+      if (panel.current) setCaptureError(errorCode(problem, 'browser_capture_failed'));
+    } finally {
+      if (panel.current) setCapturing(false);
+    }
+  }
+
   return <section className="embedded-browser" aria-label={copy.title}>
     <form className="embedded-browser-bar" onSubmit={event => { event.preventDefault(); void openAddress(); }}>
       <div className="embedded-browser-navigation">
-        <Tooltip title={copy.back}><Button type="text" aria-label={copy.back} icon={<ArrowLeftOutlined />} disabled={!opened || opening || checking} onClick={() => go('back')} /></Tooltip>
-        <Tooltip title={copy.forward}><Button type="text" aria-label={copy.forward} icon={<ArrowRightOutlined />} disabled={!opened || opening || checking} onClick={() => go('forward')} /></Tooltip>
-        <Tooltip title={copy.reload}><Button type="text" aria-label={copy.reload} icon={<ReloadOutlined />} disabled={!opened || opening || checking} onClick={() => go('reload')} /></Tooltip>
+        <Tooltip title={copy.back}><Button type="text" aria-label={copy.back} icon={<ArrowLeftOutlined />} disabled={!opened || opening || checking || capturing} onClick={() => go('back')} /></Tooltip>
+        <Tooltip title={copy.forward}><Button type="text" aria-label={copy.forward} icon={<ArrowRightOutlined />} disabled={!opened || opening || checking || capturing} onClick={() => go('forward')} /></Tooltip>
+        <Tooltip title={copy.reload}><Button type="text" aria-label={copy.reload} icon={<ReloadOutlined />} disabled={!opened || opening || checking || capturing} onClick={() => go('reload')} /></Tooltip>
       </div>
       <Input aria-label={copy.address} placeholder={copy.placeholder} value={address} maxLength={4096} disabled={!nativeDesktop}
         status={error === 'invalid' ? 'error' : undefined} prefix={<GlobalOutlined />} spellCheck={false} autoCapitalize="none" autoComplete="off"
-        onChange={event => { editing.current = true; setAddress(event.target.value); setError(undefined); }} />
-      <Button type="primary" htmlType="submit" loading={opening} disabled={!nativeDesktop || checking || !address.trim()}>{copy.open}</Button>
+        onChange={event => { editing.current = true; setAddress(event.target.value); setError(undefined); setCaptureError(undefined); }} />
+      <Button type="primary" htmlType="submit" loading={opening} disabled={!nativeDesktop || checking || capturing || !address.trim()}>{copy.open}</Button>
     </form>
     {nativeDesktop && <div className="embedded-browser-viewport">
       <Segmented<Viewport> aria-label={copy.viewport} size="small" value={viewport} onChange={setViewport} disabled={checking}
@@ -223,12 +251,15 @@ export default function EmbeddedBrowser({ intake, onQualityReport }: { intake?: 
       {viewport === 'custom' && <InputNumber size="small" aria-label={copy.width} min={240} max={1600} value={customWidth} onChange={setCustomWidth} disabled={checking} suffix="px" />}
       {visibleSize && <span className="embedded-browser-dimensions">{visibleSize.width} × {visibleSize.height} px</span>}
       <div className="embedded-browser-tools">
+        {onCapture && <Button size="small" icon={<FileAddOutlined />} loading={capturing} disabled={!opened || opening || checking}
+          onClick={() => void capturePage()}>{t('browserCapture')}</Button>}
         {onQualityReport && <Tooltip title={copy.checkHint}><Button size="small" icon={<FileSearchOutlined />} loading={checking}
-          disabled={!opened || !localPage || opening} onClick={() => void checkPage()}>{copy.check}</Button></Tooltip>}
-        <Tooltip title={copy.inspectHint}><Button size="small" type="text" icon={<CodeOutlined />} disabled={!opened || !localPage || opening || checking} onClick={() => go('inspect')}>{copy.inspect}</Button></Tooltip>
+          disabled={!opened || !localPage || opening || capturing} onClick={() => void checkPage()}>{copy.check}</Button></Tooltip>}
+        <Tooltip title={copy.inspectHint}><Button size="small" type="text" icon={<CodeOutlined />} disabled={!opened || !localPage || opening || checking || capturing} onClick={() => go('inspect')}>{copy.inspect}</Button></Tooltip>
       </div>
     </div>}
     {error && <Alert type="error" showIcon title={copy[error]} />}
+    {captureError && <Alert type="warning" showIcon title={t(captureError, { defaultValue: t('browser_capture_failed') })} />}
     {!nativeDesktop && <Alert type="info" showIcon title={copy.desktop} />}
     <div className="embedded-browser-stage">
       <div ref={panel} className="embedded-browser-surface" style={{ width: viewportWidth }}>
