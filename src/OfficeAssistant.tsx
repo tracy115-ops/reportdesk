@@ -1,10 +1,10 @@
-import { ArrowUpOutlined, BranchesOutlined, CloseOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DownOutlined, DownloadOutlined, EditOutlined, EllipsisOutlined, EyeOutlined, FilePptOutlined, FileWordOutlined, FolderOpenOutlined, GlobalOutlined, HistoryOutlined, LinkOutlined, MessageOutlined, PlusOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
+import { ArrowUpOutlined, BranchesOutlined, CloseOutlined, CodeOutlined, CopyOutlined, DatabaseOutlined, DownloadOutlined, EditOutlined, EllipsisOutlined, EyeOutlined, FilePptOutlined, FileWordOutlined, FolderOpenOutlined, GlobalOutlined, HistoryOutlined, LinkOutlined, MessageOutlined, PlusOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
 import { Alert, App as AntApp, Button, Drawer, Dropdown, Grid, Input, Modal, Select, Spin, Tag, Tooltip } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { cancelPolish, chatWithAgent, errorCode, nativeDesktop, openAgentFolder, openAgentTerminal, pickAgentFolder, runOffice } from './desktop';
-import type { AgentEngine, AgentWorkspaceChanges } from './desktop';
+import type { AgentEngine, AgentOptionGroup, AgentWorkspaceChanges } from './desktop';
 import { evidenceSignature, quickPeriod } from './domain';
 import type { ArtifactKind, Evidence, Loaded, Locale } from './domain';
 import { assistantConversationTitle, assistantInput, assistantPresets, assistantVersion, conversationPath, conversationVersions, datasetExcerpts, deleteTask, storedTasks, storeTask, storeTaskResult, taskVersions } from './office';
@@ -87,11 +87,13 @@ function ReplyContent({ draft, show }: { draft: AssistantDraft; show: (ref: Evid
 interface Props {
   files: Loaded[];
   hasCodex: boolean;
-  engine?: AgentEngine;
-  engineName?: string;
-  engineStatus?: string;
-  checkEngine: () => void;
-  openAgentSettings?: () => void;
+  engine: AgentEngine;
+  engineName: string;
+  engineOptions: AgentOptionGroup[];
+  engineLocked: boolean;
+  engineStatus: string;
+  changeEngine: (engine: AgentEngine) => void;
+  openAgentSettings: () => void;
   openKnowledge?: (scope: AssistantDatasetScope, addExcerpts: (items: Evidence[]) => void) => void;
   knowledgeModels?: readonly KnowledgeModel[];
   running: boolean;
@@ -127,8 +129,8 @@ interface Props {
   }) => ReactNode;
 }
 
-export default function OfficeAssistant({ files, hasCodex, engine = 'codex', engineName = engine === 'claude' ? 'Claude Code' : 'Codex',
-  engineStatus, checkEngine, openAgentSettings, openKnowledge, knowledgeModels = [], running, setRunning, setWriting, pick, previewMaterial,
+export default function OfficeAssistant({ files, hasCodex, engine, engineName, engineOptions, engineLocked, engineStatus, changeEngine,
+  openAgentSettings, openKnowledge, knowledgeModels = [], running, setRunning, setWriting, pick, previewMaterial,
   artifacts, deliver, preview, saveFile, exporting, show, reference, clearReference, showSourcesLoading, openCreative,
   newTaskSignal, openLibrary, openArtifacts, openTaskId, clearOpenTask, onTasksChange, runDatasetCommand, datasetCommandBusy, renderTaskContext }: Props) {
   const { t, i18n } = useTranslation();
@@ -146,7 +148,6 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
   const changingConversation = useRef(false);
   const dockHistory = Boolean(Grid.useBreakpoint().xl);
   const [editing, setEditing] = useState<OfficeDraft>();
-  const [engineOpen, setEngineOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runningReport, setRunningReport] = useState(false);
@@ -473,8 +474,8 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
         updatedAt: new Date().toISOString(), delivery: crypto.randomUUID(),
         deliveryError: undefined, retryKinds: undefined, format: 'answer', draft: result };
       acceptingProgress = false;
-      setRunProgress(undefined);
       const committed = await commitResult(next, assistantVersion(next, 'generatedVersion', parentId)!, task);
+      setRunProgress(undefined);
       if (format === 'pptx') {
         openCreative({ draft: next.draft!.value, refs, locale, brief: current.request.trim() });
       } else if (format !== 'answer') {
@@ -725,11 +726,8 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
     else if (!workspace) responseStatus = runProgress?.text ? 'assistantReplying'
       : nativeEngine && !runProgress?.connection ? 'agentStarting' : 'agentWaitingReply';
   }
-  const engineState = engineStatus ?? 'codex_checking';
-  const engineReady = engineState === 'codex_ready';
-  const readyText = nativeDesktop ? t(engineState, engineCopy) : t('assistantOffline');
-  const installCommand = engine === 'claude' ? 'npm install -g @anthropic-ai/claude-code' : 'npm install -g @openai/codex';
-  const loginCommand = engine === 'claude' ? 'claude auth login' : 'codex login';
+  const engineReady = engineStatus === 'codex_ready' || engineStatus === 'provider_configured';
+  const readyText = nativeDesktop ? t(engineStatus, engineCopy) : t('assistantOffline');
   const sendLabel = t(reportPlan ? 'assistantRunReport' : failure ? 'retry' : format === 'answer' ? 'assistantSend' : 'runTask');
   const citedIds = new Set(draft && [draft.value.title, ...draft.value.sections.flatMap(part => [part.heading, part.text])].join('\n').match(/\[S\d+\]/g));
   const usedSources = draft?.refs.filter(ref => citedIds.has(`[${ref.id}]`)) ?? [];
@@ -737,11 +735,14 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
     dataset, filenames: selected.map(file => file.material.relative), retrievalActive,
     locked: switchingBlocked, hasDraft: Boolean(draft), showScope,
   });
-  const showAgentSettings = openAgentSettings ?? (() => setEngineOpen(true));
-  const engineControl = <Tooltip title={readyText}><button className="assistant-engine" type="button" onClick={showAgentSettings} aria-label={t('assistantConnection', engineCopy)}>
-    <span className={engineReady ? 'assistant-engine-ready' : 'assistant-engine-waiting'} aria-hidden />
-    <span className="assistant-engine-label">{engineReady ? engineName : t('assistantOffline')}</span><DownOutlined aria-hidden />
-  </button></Tooltip>;
+  const engineControl = <Tooltip title={readyText}>
+    <Select<AgentEngine | 'settings'> className="assistant-engine" variant="borderless" value={engine} disabled={engineLocked}
+      aria-label={t('chooseAgentModel')} placement="topRight" popupMatchSelectWidth={300} showSearch={{ optionFilterProp: 'label' }}
+      prefix={<span className={engineReady ? 'assistant-engine-ready' : 'assistant-engine-waiting'} aria-hidden />}
+      options={[...engineOptions, { value: 'settings', label: t('agentSettings') }]}
+      labelRender={() => <span className="assistant-engine-label" title={engineName}>{engineName}</span>}
+      onChange={next => { if (next === 'settings') openAgentSettings(); else changeEngine(next); }} />
+  </Tooltip>;
   const commandControl = <Dropdown trigger={['click']} placement="topLeft" open={commandsOpen && !locked && commandChoices.length > 0}
     onOpenChange={open => { setCommandsOpen(open); setCommandIndex(0); }}
     menu={{
@@ -806,9 +807,9 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
     {!inTask && <div className="assistant-intro">
       <div className="assistant-welcome">
         <h1>{t('composerWelcome')}</h1>
-        {!engineReady && engineState !== 'codex_checking' && <div className="assistant-welcome-connection">
+        {!engineReady && engineStatus !== 'codex_checking' && <div className="assistant-welcome-connection">
           <span>{readyText}</span>
-          <Button size="small" onClick={showAgentSettings}>{t('agentSettings')}</Button>
+          <Button size="small" onClick={openAgentSettings}>{t('agentSettings')}</Button>
         </div>}
       </div>
     </div>}
@@ -898,6 +899,7 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
       {running && runProgress && <>
         <AgentActivity tools={runProgress.tools} />
         {runProgress.text && <article className="assistant-reply agent-live-reply">
+          <ReplyAuthor />
           <AssistantReply text={runProgress.text} refs={[]} show={show} />
         </article>}
       </>}
@@ -924,7 +926,7 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
       {task.status === 'failed' && <Alert type={task.error === 'codex_cancelled' ? 'info' : 'error'} showIcon
         title={task.error === 'codex_cancelled' ? t('codexStopped') : t(task.error ?? 'codex_failed', { ...engineCopy, defaultValue: t('codex_failed', engineCopy) })}
         action={task.error === 'codex_auth' || task.error === 'codex_missing' || task.error === 'codex_version' || task.error === 'codex_network'
-          ? <Button size="small" onClick={showAgentSettings}>{t('assistantConnection', engineCopy)}</Button> : undefined} />}
+          ? <Button size="small" onClick={openAgentSettings}>{t('assistantConnection', engineCopy)}</Button> : undefined} />}
       {task.status === 'failed' && <AgentFileChanges changes={task.failedChanges} />}
       <section className="assistant-composer" aria-label={t('assistantMessage')}>
         {forkFrom && <div className="assistant-branch-banner" role="status">
@@ -1013,9 +1015,11 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
               options={[{ value: 'zh-CN', label: t('zh') }, { value: 'en-US', label: t('en') }]} />
             }
           </div>}
-          {engineControl}
-          {running ? <Button className="assistant-send assistant-stop" disabled={phase === 'files' || stopping} icon={<span className="assistant-stop-square" />} onClick={stopCurrent}><span className="assistant-send-label">{t(stopping ? 'agentStopping' : 'stopTask')}</span></Button> :
-            <Tooltip title={t('assistantSendShortcut')}><Button className="assistant-send" type="primary" icon={<ArrowUpOutlined />} loading={runningReport} disabled={!canSubmit} aria-label={sendLabel} onClick={() => { setCommandsOpen(false); void submit(); }}><span className="assistant-send-label">{sendLabel}</span></Button></Tooltip>}
+          <div className="assistant-submit-controls">
+            {engineControl}
+            {running ? <Button className="assistant-send assistant-stop" disabled={phase === 'files' || stopping} icon={<span className="assistant-stop-square" />} onClick={stopCurrent}><span className="assistant-send-label">{t(stopping ? 'agentStopping' : 'stopTask')}</span></Button> :
+              <Tooltip title={t('assistantSendShortcut')}><Button className="assistant-send" type="primary" icon={<ArrowUpOutlined />} loading={runningReport} disabled={!canSubmit} aria-label={sendLabel} onClick={() => { setCommandsOpen(false); void submit(); }}><span className="assistant-send-label">{sendLabel}</span></Button></Tooltip>}
+          </div>
         </>} />
       </section>
       <div className="assistant-composer-note">
@@ -1033,16 +1037,6 @@ export default function OfficeAssistant({ files, hasCodex, engine = 'codex', eng
         <strong>{ref.id} · {ref.locations[0]?.file}</strong><small>{ref.locations[0]?.at}</small><span>{ref.text}</span>
       </button>)}</div>
     </Drawer>
-    <Modal open={engineOpen} title={t('assistantConnection', engineCopy)} footer={<Button onClick={() => setEngineOpen(false)}>{t('close')}</Button>} onCancel={() => setEngineOpen(false)}>
-      {!nativeDesktop ? <p>{t('codexBrowser', engineCopy)}</p> : <div className="assistant-connection">
-        <Tag color={engineState === 'codex_ready' ? 'green' : 'default'}>{t(engineState, engineCopy)}</Tag>
-        {engineState === 'codex_ready' ? <p>{t('taskPrivacy', engineCopy)}</p> : <>
-          {engineState === 'codex_missing' && <p>{t('assistantInstallCli', engineCopy)} <code>{installCommand}</code></p>}
-          <p>{t('assistantLoginCli', engineCopy)} <code>{loginCommand}</code></p>
-        </>}
-        <div><Button disabled={locked || engineState === 'codex_checking'} onClick={checkEngine}>{t('checkEngine')}</Button></div>
-      </div>}
-    </Modal>
     <Drawer open={versionsOpen} size={520} title={t('assistantBranches')} onClose={() => { setVersionsOpen(false); setVersionPreview(undefined); }}>
       {!versions ? <Spin /> : [...turns.values()].reverse().map(version => <div className="assistant-history-row assistant-branch-row" key={version.id}>
         <button type="button" onClick={() => setVersionPreview(version)}>

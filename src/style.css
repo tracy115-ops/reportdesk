@@ -208,10 +208,6 @@ button:focus-visible { outline: 2px solid #258763; outline-offset: 3px; }
 .assistant-start-view { max-width: 880px; }
 .assistant-session-tools { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; min-height: 32px; }
 .assistant-toolbar, .assistant-material-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-.assistant-engine { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; color: #46516d; background: #fff; border: 1px solid var(--line); border-radius: 7px; cursor: pointer; font-size: 12px; }
-.assistant-engine:hover { border-color: #a6acd8; color: var(--accent); }
-.assistant-engine-ready, .assistant-engine-waiting { width: 7px; height: 7px; border-radius: 50%; background: #30a17a; flex: 0 0 7px; }
-.assistant-engine-waiting { background: #a89457; }
 .assistant-intro { margin: clamp(36px, 7.6vh, 80px) 0 23px; }
 .assistant-intro h1 { margin: 0 0 10px; font-size: clamp(29px, 3.4vw, 45px); line-height: 1.17; letter-spacing: -.045em; font-weight: 720; color: #181d35; }
 .assistant-intro p { font-size: 15px; margin: 0; color: var(--muted); line-height: 1.55; }
@@ -269,9 +265,6 @@ button:focus-visible { outline: 2px solid #258763; outline-offset: 3px; }
 .assistant-output-icon.pptx { background: #f8e9e1; color: #a85835; }
 .assistant-output-title { color: #2c385e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .assistant-restore-note { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-block-start: 5px; }
-.assistant-connection { display: grid; gap: 10px; justify-items: start; }
-.assistant-connection p { margin: 0; }
-.assistant-connection code { display: inline-block; padding: 2px 4px; background: #eef0fa; border-radius: 4px; }
 .assistant-material-footer { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
 .assistant-material-footer > span { color: var(--muted); }
 .assistant-attachment-list, .assistant-picker-list { list-style: none; padding: 0; margin: 8px 0 0; }

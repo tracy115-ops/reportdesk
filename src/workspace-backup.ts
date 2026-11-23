@@ -9,6 +9,7 @@ import { validToolDraft } from './tool-draft';
 import { validTableAnalysis } from './table-analysis';
 import { validCreativeProject } from './creative-project';
 import { validWorkflows } from './office-workflows';
+import { isProviderEngine } from './provider-client';
 
 const format = 'Office Workspace Backup';
 const version = 4;
@@ -156,7 +157,7 @@ function preferences(value: unknown) {
     'dataset-scans': entry => objectValues(entry, datasetScan),
     'office-commands': entry => Array.isArray(entry) && entry.length <= 32 && entry.every(command => isObject(command)
       && isSet(command.id) && isSet(command.name) && command.name.length <= 60 && isSet(command.request) && command.request.length <= 1200),
-    'agent-engine': entry => isText(entry) && (isChoice(entry, ['codex', 'claude']) || /^provider:[\da-f-]{36}$/i.test(entry)),
+    'agent-engine': entry => isChoice(entry, ['codex', 'claude']) || isProviderEngine(entry),
     'office-workflows': validWorkflows,
   };
   return preferenceNames.every(name => isOptional(values[name], checks[name]));

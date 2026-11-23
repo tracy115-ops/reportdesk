@@ -108,21 +108,20 @@
 .assistant-send-label { white-space: nowrap; }
 .assistant-send.ant-btn:not(:disabled):hover { background: #105146; color: white; }
 .assistant-send.ant-btn:disabled { background: #ebf0f2; color: #697c89; }
+.assistant-submit-controls { display: flex; align-items: center; gap: 6px; margin-inline-start: auto; }
 .is-composer .assistant-engine {
   height: 30px;
-  max-width: 150px;
+  width: 166px;
   flex-shrink: 0;
-  gap: 5px;
-  margin-inline-start: auto;
-  padding: 0 7px;
   border: 1px solid transparent;
   border-radius: 6px;
   color: var(--assistant-muted);
+  font-size: 12px;
 }
 .is-composer .assistant-engine:hover { border-color: #dce5eb; background: #f4f7f9; color: var(--assistant-accent); }
 .assistant-engine-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.is-composer .assistant-engine > .anticon { font-size: 9px; }
-.is-composer .assistant-engine-waiting { background: #a17b45; }
+.assistant-engine-ready, .assistant-engine-waiting { display: block; width: 5px; height: 5px; border-radius: 50%; background: #6f9674; }
+.assistant-engine-waiting { background: #a17b45; }
 .assistant-send.assistant-stop { background: var(--assistant-tint); color: var(--assistant-accent); }
 .assistant-stop-square { display: block; width: 11px; height: 11px; border-radius: 2px; background: currentColor; }
 .assistant-composer-note { display: flex; align-items: center; padding: 5px 2px 0; color: var(--assistant-muted); }
@@ -420,6 +419,7 @@
 @container (max-width: 740px) {
   .is-composer .assistant-material-actions { flex-wrap: wrap; }
   .is-composer .assistant-options { flex: 1 1 120px; }
+  .is-composer .assistant-engine { width: 130px; }
   .assistant-task-context.is-inline { max-width: 42%; }
 }
 @media (max-width: 550px) {
@@ -429,7 +429,6 @@
   .is-composer .assistant-options .ant-select { width: 110px; }
   .is-composer .assistant-options .ant-select:nth-child(2) { width: 92px; }
   .assistant-send.ant-btn { padding-inline: 9px; }
-  .is-composer .assistant-engine { max-width: 130px; }
   .assistant-task-view .assistant-panel { padding-inline: 0; }
 }
 .assistant-rag-control { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; margin: 5px 0 7px; padding-inline: 12px; }

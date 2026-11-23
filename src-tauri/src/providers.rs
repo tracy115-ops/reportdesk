@@ -1,15 +1,23 @@
+use crate::agent_activity::AgentEvent;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::future::{AbortHandle, Abortable};
 use reqwest::{header, multipart, Client, Method, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, io::Write, net::IpAddr, path::PathBuf, sync::Mutex, time::Duration};
-use tauri::State;
+use std::{
+    collections::BTreeSet, fs, io::Write, net::IpAddr, path::PathBuf, sync::Mutex, time::Duration,
+};
+use tauri::{
+    ipc::{Channel, JavaScriptChannelId},
+    State, Webview,
+};
 use url::Host;
 use zeroize::Zeroizing;
 
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
 const MEDIA_LIMIT: usize = 22 * 1024 * 1024;
+const PROFILE_LIMIT: usize = 1024 * 1024;
+const TEXT_LIMIT: usize = 80_000;
 type ProviderResult<T> = Result<T, &'static str>;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
@@ -27,10 +35,39 @@ pub struct ProviderProfile {
     kind: ProviderKind,
     base_url: String,
     text_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    text_models: Vec<String>,
     embedding_model: Option<String>,
     image_model: Option<String>,
     tts_model: Option<String>,
     video_model: Option<String>,
+}
+
+impl ProviderProfile {
+    fn restore_text_model(&mut self) {
+        if self.text_models.is_empty() {
+            self.text_models.extend(self.text_model.clone());
+        }
+        if !self
+            .text_model
+            .as_ref()
+            .is_some_and(|id| self.text_models.contains(id))
+        {
+            self.text_model = self.text_models.first().cloned();
+        }
+    }
+
+    fn selected_model(&self, id: Option<&str>) -> ProviderResult<&str> {
+        match id {
+            Some(id) => self
+                .text_models
+                .iter()
+                .find(|item| item.as_str() == id)
+                .map(String::as_str)
+                .ok_or("provider_model"),
+            None => model(&self.text_model),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -93,8 +130,13 @@ impl Providers {
 
     fn read(&self) -> ProviderResult<Vec<StoredProvider>> {
         match fs::read(&self.path) {
-            Ok(bytes) if bytes.len() <= 256 * 1024 => {
-                serde_json::from_slice(&bytes).map_err(|_| "provider_storage")
+            Ok(bytes) if bytes.len() <= PROFILE_LIMIT => {
+                let mut entries: Vec<StoredProvider> =
+                    serde_json::from_slice(&bytes).map_err(|_| "provider_storage")?;
+                for entry in &mut entries {
+                    entry.profile.restore_text_model();
+                }
+                Ok(entries)
             }
             Ok(_) => Err("provider_storage"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -105,7 +147,11 @@ impl Providers {
     fn write(&self, providers: &[StoredProvider]) -> ProviderResult<()> {
         let parent = self.path.parent().ok_or("provider_storage")?;
         let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|_| "provider_storage")?;
-        serde_json::to_writer(&mut staged, providers).map_err(|_| "provider_storage")?;
+        let bytes = serde_json::to_vec(providers).map_err(|_| "provider_storage")?;
+        if bytes.len() > PROFILE_LIMIT {
+            return Err("provider_storage");
+        }
+        staged.write_all(&bytes).map_err(|_| "provider_storage")?;
         staged.flush().map_err(|_| "provider_storage")?;
         staged
             .as_file()
@@ -128,35 +174,46 @@ impl Providers {
         method: Method,
         route: &str,
     ) -> ProviderResult<reqwest::RequestBuilder> {
-        let url = endpoint(&entry.profile.base_url, route)?;
+        let key = entry.protected_key.as_deref().map(reveal).transpose()?;
+        self.request_with_key(
+            entry.profile.kind,
+            key.as_ref().map(|key| key.as_str()),
+            method,
+            endpoint(&entry.profile.base_url, route)?,
+        )
+    }
+
+    fn request_with_key(
+        &self,
+        kind: ProviderKind,
+        key: Option<&str>,
+        method: Method,
+        url: Url,
+    ) -> ProviderResult<reqwest::RequestBuilder> {
         let mut request = self.client.request(method, url);
-        if entry.profile.kind == ProviderKind::Anthropic {
+        if kind == ProviderKind::Anthropic {
             request = request.header("anthropic-version", "2023-06-01");
         }
-        if let Some(protected) = &entry.protected_key {
-            let key = reveal(protected)?;
-            let (name, value) = match entry.profile.kind {
+        if let Some(key) = key {
+            let key = checked_key(key)?;
+            let (name, value) = match kind {
                 ProviderKind::Openai => (
                     header::AUTHORIZATION,
-                    Zeroizing::new(format!("Bearer {}", &*key)),
+                    header::HeaderValue::from_str(&Zeroizing::new(format!("Bearer {key}"))),
                 ),
-                ProviderKind::Anthropic => (header::HeaderName::from_static("x-api-key"), key),
+                ProviderKind::Anthropic => (
+                    header::HeaderName::from_static("x-api-key"),
+                    header::HeaderValue::from_str(key),
+                ),
             };
-            let mut value =
-                header::HeaderValue::from_str(&value).map_err(|_| "provider_key_store")?;
+            let mut value = value.map_err(|_| "provider_key_store")?;
             value.set_sensitive(true);
             request = request.header(name, value);
         }
         Ok(request)
     }
 
-    pub async fn text(
-        &self,
-        id: &str,
-        system: &str,
-        prompt: &str,
-        schema: Option<Value>,
-    ) -> ProviderResult<TextReply> {
+    async fn text(&self, task: TextRequest<'_>) -> ProviderResult<TextReply> {
         let (abort, registration) = AbortHandle::new_pair();
         {
             let mut active = self.active_text.lock().map_err(|_| "provider_storage")?;
@@ -166,24 +223,26 @@ impl Providers {
             *active = Some(abort);
         }
         let _job = TextJob(&self.active_text);
-        Abortable::new(self.generate_text(id, system, prompt, schema), registration)
+        Abortable::new(self.generate_text(task), registration)
             .await
             .map_err(|_| "provider_cancelled")?
     }
 
-    async fn generate_text(
-        &self,
-        id: &str,
-        system: &str,
-        prompt: &str,
-        schema: Option<Value>,
-    ) -> ProviderResult<TextReply> {
-        validate_text(prompt, 80_000)?;
+    async fn generate_text(&self, task: TextRequest<'_>) -> ProviderResult<TextReply> {
+        let TextRequest {
+            id,
+            model_id,
+            system,
+            prompt,
+            schema,
+            progress,
+        } = task;
+        validate_text(prompt, TEXT_LIMIT)?;
         if system.len() > 20_000 {
             return Err("provider_input");
         }
         let entry = self.get(id)?;
-        let model = model(&entry.profile.text_model)?;
+        let model = entry.profile.selected_model(model_id)?;
         let system = match &schema {
             Some(value) if value.is_object() => {
                 let schema = serde_json::to_string(value).map_err(|_| "provider_input")?;
@@ -211,36 +270,101 @@ impl Providers {
                 }),
             ),
         };
-        let answer = read_json(
-            self.request(&entry, Method::POST, route)?.json(&body),
-            JSON_LIMIT,
-        )
-        .await?;
-        let text = match entry.profile.kind {
-            ProviderKind::Openai => answer
-                .pointer("/choices/0/message/content")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or("provider_output")?,
-            ProviderKind::Anthropic => answer["content"]
-                .as_array()
-                .ok_or("provider_output")?
-                .iter()
-                .filter(|part| part["type"] == "text")
-                .filter_map(|part| part["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
+        let text = if let Some(channel) = progress.filter(|_| schema.is_none()) {
+            self.chat_text(&entry, route, body, channel).await?
+        } else {
+            let answer = read_json(
+                self.request(&entry, Method::POST, route)?.json(&body),
+                JSON_LIMIT,
+            )
+            .await?;
+            response_text(&answer, entry.profile.kind)?
         };
-        if text.trim().is_empty() || text.len() > 80_000 {
+        if text.trim().is_empty() || text.len() > TEXT_LIMIT {
             return Err("provider_output");
         }
-        let structured = if schema.is_some() {
-            Some(parse_object(&text)?)
-        } else {
-            None
-        };
+        let structured = schema.is_some().then(|| parse_object(&text)).transpose()?;
         Ok(TextReply { text, structured })
     }
+
+    async fn chat_text(
+        &self,
+        entry: &StoredProvider,
+        route: &str,
+        mut body: Value,
+        channel: &Channel<Vec<AgentEvent>>,
+    ) -> ProviderResult<String> {
+        body["stream"] = Value::Bool(true);
+        let request = self.request(entry, Method::POST, route)?;
+        let response = request.json(&body).send().await.map_err(network_error)?;
+        let kind = entry.profile.kind;
+        // Retry only an explicit rejection of the streaming parameter before any response is generated.
+        if matches!(response.status().as_u16(), 400 | 422 | 501) {
+            let bytes = read_body(response, 64 * 1024, "provider_request").await?;
+            if streaming_rejected(&bytes) {
+                body["stream"] = Value::Bool(false);
+                let answer = read_json(
+                    self.request(entry, Method::POST, route)?.json(&body),
+                    JSON_LIMIT,
+                )
+                .await?;
+                return response_text(&answer, kind);
+            }
+            return Err("provider_request");
+        }
+        let response = status(response)?;
+        let sse = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+            });
+        if sse {
+            stream_text(response, kind, channel).await
+        } else {
+            let bytes = read_body(response, JSON_LIMIT, "provider_output").await?;
+            let answer: Value = serde_json::from_slice(&bytes).map_err(|_| "provider_output")?;
+            response_text(&answer, kind)
+        }
+    }
+}
+
+fn response_text(answer: &Value, kind: ProviderKind) -> ProviderResult<String> {
+    match kind {
+        ProviderKind::Openai => answer
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or("provider_output"),
+        ProviderKind::Anthropic => Ok(answer["content"]
+            .as_array()
+            .ok_or("provider_output")?
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")),
+    }
+}
+
+fn streaming_rejected(bytes: &[u8]) -> bool {
+    let body = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    body.contains("stream")
+        && [
+            "not support",
+            "unsupported",
+            "not implement",
+            "not permitted",
+            "unknown field",
+            "unrecognized",
+            "extra_forbidden",
+        ]
+        .iter()
+        .any(|phrase| body.contains(phrase))
 }
 
 fn validate_text(value: &str, max: usize) -> ProviderResult<()> {
@@ -248,6 +372,17 @@ fn validate_text(value: &str, max: usize) -> ProviderResult<()> {
         return Err("provider_input");
     }
     Ok(())
+}
+
+fn valid_model_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 180 && !id.chars().any(char::is_control)
+}
+
+fn checked_key(key: &str) -> ProviderResult<&str> {
+    if key.len() > 4096 || key.trim().chars().any(char::is_control) {
+        return Err("provider_input");
+    }
+    Ok(key.trim())
 }
 
 fn model(value: &Option<String>) -> ProviderResult<&str> {
@@ -289,6 +424,13 @@ fn endpoint(base: &str, route: &str) -> ProviderResult<Url> {
     Ok(url)
 }
 
+fn canonical_base(value: &str) -> ProviderResult<String> {
+    Ok(normalize_base(value)?
+        .to_string()
+        .trim_end_matches('/')
+        .to_owned())
+}
+
 #[tauri::command]
 pub fn provider_list(state: State<'_, Providers>) -> ProviderResult<Vec<PublicProvider>> {
     Ok(state.read()?.iter().map(StoredProvider::public).collect())
@@ -303,10 +445,7 @@ pub fn provider_save(
     uuid::Uuid::parse_str(&profile.id).map_err(|_| "provider_input")?;
     profile.name = profile.name.trim().to_owned();
     validate_text(&profile.name, 100)?;
-    profile.base_url = normalize_base(&profile.base_url)?
-        .to_string()
-        .trim_end_matches('/')
-        .to_owned();
+    profile.base_url = canonical_base(&profile.base_url)?;
     for field in [
         &mut profile.text_model,
         &mut profile.embedding_model,
@@ -324,6 +463,19 @@ pub fn provider_save(
             }
         }
     }
+    let mut unique = BTreeSet::new();
+    let mut text_models = Vec::new();
+    for id in std::mem::take(&mut profile.text_models) {
+        let id = id.trim();
+        if !valid_model_id(id) {
+            return Err("provider_input");
+        }
+        if unique.insert(id.to_owned()) {
+            text_models.push(id.to_owned());
+        }
+    }
+    profile.text_models = text_models;
+    profile.restore_text_model();
     if profile.kind == ProviderKind::Anthropic {
         profile.embedding_model = None;
         profile.image_model = None;
@@ -337,12 +489,7 @@ pub fn provider_save(
         .position(|entry| entry.profile.id == profile.id);
     let protected_key = match api_key.map(Zeroizing::new) {
         Some(key) if key.trim().is_empty() => None,
-        Some(key) => {
-            if key.len() > 4096 || key.trim().chars().any(char::is_control) {
-                return Err("provider_input");
-            }
-            Some(protect(key.trim())?)
-        }
+        Some(key) => Some(protect(checked_key(&key)?)?),
         None => position.and_then(|index| {
             let previous = &entries[index];
             (previous.profile.base_url == profile.base_url && previous.profile.kind == profile.kind)
@@ -376,7 +523,84 @@ pub fn provider_remove(state: State<'_, Providers>, id: String) -> ProviderResul
 }
 
 #[tauri::command]
-pub async fn provider_test(state: State<'_, Providers>, id: String) -> ProviderResult<()> {
+pub async fn provider_models(
+    state: State<'_, Providers>,
+    mut profile: ProviderProfile,
+    api_key: Option<String>,
+) -> ProviderResult<Vec<String>> {
+    profile.base_url = canonical_base(&profile.base_url)?;
+    let key = match api_key.map(Zeroizing::new) {
+        Some(key) if !key.trim().is_empty() => Some(key),
+        _ => state
+            .read()?
+            .into_iter()
+            .find(|entry| {
+                entry.profile.id == profile.id
+                    && entry.profile.base_url == profile.base_url
+                    && entry.profile.kind == profile.kind
+            })
+            .and_then(|entry| entry.protected_key)
+            .as_deref()
+            .map(reveal)
+            .transpose()?,
+    };
+    let mut models = BTreeSet::new();
+    let mut seen_pages = BTreeSet::new();
+    let mut after = None::<String>;
+    loop {
+        let mut url = endpoint(&profile.base_url, "models")?;
+        if let Some(cursor) = &after {
+            url.query_pairs_mut().append_pair("after_id", cursor);
+        }
+        let request = state
+            .request_with_key(
+                profile.kind,
+                key.as_ref().map(|key| key.as_str()),
+                Method::GET,
+                url,
+            )?
+            .timeout(Duration::from_secs(15));
+        let answer = read_json(request, JSON_LIMIT).await?;
+        let entries = answer["data"].as_array().ok_or("provider_output")?;
+        models.extend(
+            entries
+                .iter()
+                .filter_map(|entry| entry["id"].as_str())
+                .map(str::trim)
+                .filter(|id| valid_model_id(id))
+                .map(str::to_owned),
+        );
+        if profile.kind != ProviderKind::Anthropic || answer["has_more"] != true {
+            return Ok(models.into_iter().collect());
+        }
+        let cursor = answer["last_id"]
+            .as_str()
+            .filter(|id| valid_model_id(id))
+            .ok_or("provider_output")?;
+        if seen_pages.len() >= 16 || !seen_pages.insert(cursor.to_owned()) {
+            return Err("provider_output");
+        }
+        after = Some(cursor.to_owned());
+    }
+}
+
+#[tauri::command]
+pub async fn provider_test(
+    state: State<'_, Providers>,
+    id: String,
+    model_id: Option<String>,
+) -> ProviderResult<()> {
+    let probe = TextRequest {
+        id: &id,
+        model_id: model_id.as_deref(),
+        system: "",
+        prompt: "Respond with OK.",
+        schema: None,
+        progress: None,
+    };
+    if model_id.is_some() {
+        return state.text(probe).await.map(|_| ());
+    }
     let entry = state.get(&id)?;
     let response = state
         .request(&entry, Method::GET, "models")?
@@ -386,7 +610,7 @@ pub async fn provider_test(state: State<'_, Providers>, id: String) -> ProviderR
         .map_err(network_error)?;
     match response.status().as_u16() {
         404 | 405 if entry.profile.text_model.is_some() => {
-            state.text(&id, "", "Respond with OK.", None).await?;
+            state.text(probe).await?;
             Ok(())
         }
         _ => status(response).map(|_| ()),
@@ -400,15 +624,37 @@ pub struct TextReply {
     structured: Option<Value>,
 }
 
+struct TextRequest<'a> {
+    id: &'a str,
+    model_id: Option<&'a str>,
+    system: &'a str,
+    prompt: &'a str,
+    schema: Option<Value>,
+    progress: Option<&'a Channel<Vec<AgentEvent>>>,
+}
+
 #[tauri::command]
 pub async fn provider_text(
     state: State<'_, Providers>,
+    webview: Webview,
     id: String,
     system: String,
     prompt: String,
     schema: Option<Value>,
+    model_id: Option<String>,
+    progress: Option<JavaScriptChannelId>,
 ) -> ProviderResult<TextReply> {
-    state.text(&id, &system, &prompt, schema).await
+    let progress = progress.map(|id| id.channel_on(webview));
+    state
+        .text(TextRequest {
+            id: &id,
+            model_id: model_id.as_deref(),
+            system: &system,
+            prompt: &prompt,
+            schema,
+            progress: progress.as_ref(),
+        })
+        .await
 }
 
 #[tauri::command]
@@ -783,7 +1029,15 @@ async fn read_bytes(
     limit: usize,
     limit_error: &'static str,
 ) -> ProviderResult<Vec<u8>> {
-    let mut response = status(request.send().await.map_err(network_error)?)?;
+    let response = status(request.send().await.map_err(network_error)?)?;
+    read_body(response, limit, limit_error).await
+}
+
+async fn read_body(
+    mut response: Response,
+    limit: usize,
+    limit_error: &'static str,
+) -> ProviderResult<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|len| len > limit as u64)
@@ -798,6 +1052,131 @@ async fn read_bytes(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+#[derive(Default)]
+struct TextStream {
+    data: Vec<u8>,
+    text: String,
+    done: bool,
+}
+
+impl TextStream {
+    fn line(&mut self, line: &[u8], kind: ProviderKind) -> ProviderResult<()> {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(line);
+        if line.is_empty() {
+            return self.event(kind);
+        }
+        if let Some(data) = line.strip_prefix(b"data:") {
+            if !self.data.is_empty() {
+                self.data.push(b'\n');
+            }
+            self.data
+                .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+        }
+        Ok(())
+    }
+
+    fn event(&mut self, kind: ProviderKind) -> ProviderResult<()> {
+        if self.data.is_empty() {
+            return Ok(());
+        }
+        let data = std::mem::take(&mut self.data);
+        if data == b"[DONE]" {
+            self.done = true;
+            return Ok(());
+        }
+        let event: Value = serde_json::from_slice(&data).map_err(|_| "provider_output")?;
+        if let Some(error) = event.get("error").filter(|error| !error.is_null()) {
+            return Err(
+                match error["type"].as_str().or_else(|| error["code"].as_str()) {
+                    Some("authentication_error" | "permission_error" | "invalid_api_key") => {
+                        "provider_auth"
+                    }
+                    Some("rate_limit_error" | "rate_limit_exceeded" | "insufficient_quota") => {
+                        "provider_rate_limit"
+                    }
+                    Some("overloaded_error" | "api_error" | "server_error") => "provider_service",
+                    _ => "provider_request",
+                },
+            );
+        }
+        match kind {
+            ProviderKind::Openai => {
+                let choice = &event["choices"][0];
+                if let Some(text) = choice["delta"]["content"].as_str() {
+                    self.text.push_str(text);
+                }
+                self.done = choice["finish_reason"].is_string();
+            }
+            ProviderKind::Anthropic => match event["type"].as_str() {
+                Some("content_block_start") if event["content_block"]["type"] == "text" => {
+                    if !self.text.is_empty() {
+                        self.text.push('\n');
+                    }
+                    self.text
+                        .push_str(event["content_block"]["text"].as_str().unwrap_or_default());
+                }
+                Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
+                    self.text
+                        .push_str(event["delta"]["text"].as_str().unwrap_or_default());
+                }
+                Some("message_stop") => self.done = true,
+                Some("message_delta") if event["delta"]["stop_reason"].is_string() => {
+                    self.done = true
+                }
+                _ => {}
+            },
+        }
+        if self.text.len() > TEXT_LIMIT {
+            return Err("provider_output");
+        }
+        Ok(())
+    }
+}
+
+async fn stream_text(
+    mut response: Response,
+    kind: ProviderKind,
+    channel: &Channel<Vec<AgentEvent>>,
+) -> ProviderResult<String> {
+    let mut stream = TextStream::default();
+    let mut line = Vec::new();
+    let mut received = 0;
+    while !stream.done {
+        let Some(chunk) = response.chunk().await.map_err(network_error)? else {
+            stream.line(&line, kind)?;
+            stream.event(kind)?;
+            break;
+        };
+        received += chunk.len();
+        if received > JSON_LIMIT {
+            return Err("provider_output");
+        }
+        let before = stream.text.len();
+        for piece in chunk.split_inclusive(|byte| *byte == b'\n') {
+            line.extend_from_slice(piece);
+            if piece.ends_with(b"\n") {
+                stream.line(&line, kind)?;
+                line.clear();
+                if stream.done {
+                    break;
+                }
+            }
+        }
+        if stream.text.len() > before {
+            let _ = channel.send(vec![AgentEvent::Text {
+                text: stream.text[before..].to_owned(),
+                replace: false,
+            }]);
+        }
+    }
+    if !stream.done {
+        return Err("provider_stream_interrupted");
+    }
+    Ok(stream.text)
 }
 
 fn protect(key: &str) -> ProviderResult<String> {

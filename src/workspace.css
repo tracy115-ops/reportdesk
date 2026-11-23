@@ -56,7 +56,7 @@ button:focus-visible { outline-color: #3d8069; }
 .breadcrumb strong { overflow: hidden; text-overflow: ellipsis; color: #38534a; font-weight: 600; }
 .top-actions { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 .top-actions .ant-btn { color: #788174; font-size: 13px; }
-.top-actions .engine-select { min-width: 112px; }
+.top-actions .engine-select { min-width: 112px; max-width: 205px; }
 .top-actions .engine-select .ant-select-content-value { font-size: 13px; color: var(--ink); }
 .workspace-search-trigger { display: flex; align-items: center; gap: 9px; width: 270px; margin-inline-end: 13px; color: #858f7c; font-size: 13px; background: #f5f7f2; border: 1px solid #edf0e8; height: 29px; }
 .workspace-search-trigger kbd { margin-inline-start: auto; color: #969f91; font-size: 11px; background: #fff; border: 1px solid #e0e6da; border-radius: 3px; padding: 1px 4px; }
@@ -76,9 +76,6 @@ button:focus-visible { outline-color: #3d8069; }
 .assistant-layout { max-width: 1310px; margin-inline: auto; display: grid; grid-template-columns: minmax(0, 1fr) 266px; gap: 0 33px; }
 .assistant-session-tools { grid-column: 1 / -1; margin-block-end: 12px; }
 .assistant-primary { min-width: 0; }
-.assistant-engine { border: 0; background: transparent; padding: 0; color: #8b957f; font-size: 12px; }
-.assistant-engine-ready, .assistant-engine-waiting { width: 5px; height: 5px; flex-basis: 5px; background: #b3b49e; }
-.assistant-engine-ready { background: #6f9674; }
 .assistant-session-tools .ant-btn { font-size: 13px; color: #8b9585; }
 .assistant-intro { margin: 24px 0 23px; }
 .home-eyebrow { color: #819578; font-size: 11px; font-weight: 650; letter-spacing: .16em; display: block; margin-block-end: 15px; }

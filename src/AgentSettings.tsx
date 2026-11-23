@@ -3,6 +3,7 @@ import { App as AntApp, Button, Modal, Spin, Tooltip } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { nativeDesktop } from './desktop';
 import type { AgentCliDetails, AgentEngine } from './desktop';
+import { configuredModels, providerEngine, providerTarget } from './provider-client';
 import type { ProviderProfile } from './provider-client';
 import './agent-settings.css';
 
@@ -33,13 +34,14 @@ const copy = {
     configure: '配置 API 模型',
     active: '已选为默认',
     ready: '连接正常',
+    configured: '已配置',
     checking: '检查中',
     missing: '未检测到命令行工具',
     signIn: '缺少登录或 API 凭据',
     failed: '连接失败',
     update: '需要更新命令行工具',
     desktop: '请在桌面版检测连接',
-    unconfigured: '请配置文本模型和 API 密钥',
+    unconfigured: '请选择已配置的对话模型',
     cliDescription: '使用本机命令行工具对话和执行任务。服务商可以在 CLI 中配置，也可以在左侧添加 API 模型。',
     providerDescription: '使用所配置的 API 服务和文本模型对话、生成内容。',
     install: '安装 CLI',
@@ -69,13 +71,14 @@ const copy = {
     configure: 'Configure API models',
     active: 'Selected as default',
     ready: 'Connected',
+    configured: 'Configured',
     checking: 'Checking connection',
     missing: 'CLI unavailable',
     signIn: 'Sign-in or API credential needed',
     failed: 'Connection failed',
     update: 'CLI update required',
     desktop: 'Check the connection in the desktop app',
-    unconfigured: 'Configure a text model and API key',
+    unconfigured: 'Choose a configured chat model',
     cliDescription: 'Chat and run tasks with your installed CLI. Configure its provider in the CLI or add an API model on the left.',
     providerDescription: 'Chat and create content with the configured API provider and text model.',
     install: 'Install the CLI',
@@ -104,17 +107,19 @@ export default function AgentSettings({ open, engine, status, details, profiles,
   const { message } = AntApp.useApp();
   const labels = i18n.language.startsWith('zh') ? copy.zh : copy.en;
   const cli = engine === 'codex' || engine === 'claude' ? engine : undefined;
-  const textProfiles = profiles.filter(profile => profile.textModel?.trim());
-  const provider = cli ? undefined : textProfiles.find(item => `provider:${item.id}` === engine);
+  const target = engine === 'codex' || engine === 'claude' ? undefined : providerTarget(engine);
+  const provider = target && profiles.find(item => item.id === target.id);
+  const model = target?.modelId ?? provider?.textModel;
+  const available = Boolean(provider && model && configuredModels(provider).includes(model));
   const engineName = cli === 'codex' ? 'Codex' : cli === 'claude' ? 'Claude Code' : provider?.name ?? labels.api;
   const ready = nativeDesktop && status === 'codex_ready';
   const checking = nativeDesktop && status === 'codex_checking';
   const connectionText = !nativeDesktop ? labels.desktop : checking ? labels.checking : ready ? labels.ready
-    : !cli && (!provider || provider.hasKey === false) ? labels.unconfigured
+    : !cli ? !available ? labels.unconfigured : status === 'provider_configured' ? labels.configured : t(status, { defaultValue: labels.failed })
     : status === 'codex_missing' ? labels.missing
     : status === 'codex_login' || status === 'codex_auth' ? labels.signIn
     : status === 'codex_version' ? labels.update : labels.failed;
-  const connectionTone = ready ? 'ready' : checking || !nativeDesktop ? 'neutral' : 'attention';
+  const connectionTone = ready ? 'ready' : checking || !nativeDesktop || status === 'provider_configured' ? 'neutral' : 'attention';
   const cliCommands = cli ? commands[cli] : undefined;
   const installation = cli && !checking && details?.status === status ? details : undefined;
 
@@ -143,14 +148,14 @@ export default function AgentSettings({ open, engine, status, details, profiles,
         <div className="agent-settings-options">{option('codex', 'Codex', labels.terminal)}{option('claude', 'Claude Code', labels.terminal)}</div>
         <div className="agent-settings-providers">
           <h3>{labels.api}</h3>
-          {textProfiles.length > 0 && <div className="agent-settings-options">{textProfiles.map(item =>
-            option(`provider:${item.id}`, item.name, item.textModel))}</div>}
+          <div className="agent-settings-options">{profiles.flatMap(item => configuredModels(item).map(id =>
+            option(providerEngine(item.id, id), id, item.name)))}</div>
           <Button className="agent-settings-manage" type="text" icon={<SettingOutlined />} onClick={manageProviders} disabled={locked}>{labels.configure}</Button>
         </div>
       </div>
       <section className="agent-settings-detail" aria-label={engineName}>
         <div className="agent-settings-detail-head">
-          <div><h2>{engineName}</h2>{provider?.textModel && <p className="agent-settings-model" title={provider.textModel}>{provider.textModel}</p>}</div>
+          <div><h2>{engineName}</h2>{model && <p className="agent-settings-model" title={model}>{model}</p>}</div>
           <span className="agent-settings-status" data-tone={connectionTone} role="status">
             {checking ? <Spin size="small" /> : <i aria-hidden />}{connectionText}
           </span>
@@ -165,7 +170,7 @@ export default function AgentSettings({ open, engine, status, details, profiles,
           </dd></div>}
         </dl>}
         <Button className="agent-settings-check" icon={<ReloadOutlined />} loading={checking}
-          disabled={!nativeDesktop || locked || (!cli && !provider)} onClick={recheck}>{labels.check}</Button>
+          disabled={!nativeDesktop || locked || (!cli && !available)} onClick={recheck}>{labels.check}</Button>
         {cliCommands && <details className="agent-settings-setup" key={cli} open={!ready || undefined}>
           <summary>{labels.setup}</summary>
           <div className="agent-settings-steps">

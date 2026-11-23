@@ -96,6 +96,7 @@ fn main() {
             providers::provider_save,
             providers::provider_remove,
             providers::provider_test,
+            providers::provider_models,
             providers::provider_text,
             providers::provider_cancel_text,
             providers::provider_embeddings,

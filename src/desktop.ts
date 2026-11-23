@@ -2,6 +2,8 @@ import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { materialKinds } from './domain';
 import type { Issue, Loaded, Material, MaterialKind, Narrative, Parsed, Report, Source } from './domain';
 import type { OfficeDraft } from './office';
+import { providerChat, providerDraft, providerReport, providerTarget } from './provider-client';
+import type { ProviderEngine } from './provider-client';
 
 export const nativeDesktop = isTauri();
 export const FILE_LIMIT = 32 * 1024 * 1024;
@@ -185,8 +187,9 @@ export async function loadMaterials(sources: Source[], progress: (count: number)
   return { loaded, issues };
 }
 
-export type AgentEngine = 'codex' | 'claude' | `provider:${string}`;
-export type NativeAgent = Extract<AgentEngine, 'codex' | 'claude'>;
+export type NativeAgent = 'codex' | 'claude';
+export type AgentEngine = NativeAgent | ProviderEngine;
+export type AgentOptionGroup = { label: string; options: { value: AgentEngine; label: string }[] };
 export interface AgentFolder { id: string; path: string }
 export interface AgentWorkspaceChanges {
   folderId: string;
@@ -208,23 +211,20 @@ export interface AgentCliDetails {
 export function agentCliDetails(engine: 'codex' | 'claude') {
   return invoke<AgentCliDetails>('agent_cli_details', { engine });
 }
-export async function codexStatus(engine: AgentEngine = 'codex') {
+export async function codexStatus(engine: NativeAgent = 'codex') {
   if (!nativeDesktop) return 'codexBrowser';
-  if (engine === 'codex' || engine === 'claude') return invoke<string>('codex_status', { engine });
-  const { testProvider } = await import('./provider-client');
-  try { await testProvider(engine.slice(9)); return 'codex_ready'; }
-  catch { return 'codex_failed'; }
+  return invoke<string>('codex_status', { engine });
 }
 export function polishReport(payload: string, locale: Report['settings']['locale'], engine: AgentEngine = 'codex') {
-  if (engine !== 'codex' && engine !== 'claude') return import('./provider-client').then(api => api.providerReport(engine.slice(9), payload, locale));
+  if (engine !== 'codex' && engine !== 'claude') return providerReport(providerTarget(engine), payload, locale);
   return invoke<Narrative>('polish_report', { payload, locale, engine });
 }
 export function runOffice(payload: string, locale: Report['settings']['locale'], engine: AgentEngine = 'codex') {
-  if (engine !== 'codex' && engine !== 'claude') return import('./provider-client').then(api => api.providerDraft(engine.slice(9), payload, locale));
+  if (engine !== 'codex' && engine !== 'claude') return providerDraft(providerTarget(engine), payload, locale);
   return invoke<OfficeDraft>('office_assist', { payload, locale, engine });
 }
 export function chatWithAgent(payload: string, engine: AgentEngine, folder?: AgentFolder, onProgress?: (events: AgentEvent[]) => void): Promise<AgentReply> {
-  if (engine !== 'codex' && engine !== 'claude') return import('./provider-client').then(api => api.providerChat(engine.slice(9), payload));
+  if (engine !== 'codex' && engine !== 'claude') return providerChat(providerTarget(engine), payload, onProgress);
   const progress = onProgress ? new Channel<AgentEvent[]>(onProgress) : undefined;
   return invoke<AgentReply>('assistant_chat', { payload, engine, folderId: folder?.id, progress });
 }

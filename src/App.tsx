@@ -26,7 +26,7 @@ import WorkflowWorkbench from './WorkflowWorkbench';
 import McpPanel from './McpPanel';
 import { deleteKnowledgeIndex } from './knowledge-index';
 import type { KnowledgeModel } from './knowledge-index';
-import { listProviders, providerEmbeddings, providerMedia, startVideo, videoStatus } from './provider-client';
+import { configuredModels, isProviderEngine, listProviders, providerEmbeddings, providerEngine, providerMedia, providerTarget, startVideo, testProvider, videoStatus } from './provider-client';
 import type { ProviderProfile } from './provider-client';
 import { mcpCall } from './mcp-client';
 import { expandWorkflow, matchingWorkflows, runWorkflow, validWorkflows, workflowArguments } from './office-workflows';
@@ -56,7 +56,7 @@ import {
   addBrowserFiles, agentCliDetails, cancelPolish, codexStatus, demoSource, errorCode, FILE_LIMIT, saveArtifact, listSources,
   loadMaterials, nativeDesktop, openArtifact, openMaterial, parseArtifact, pickSources, polishReport, readMaterial, relinkSource, removeSource, runOffice,
 } from './desktop';
-import type { AgentCliDetails, AgentEngine, SourceSelection } from './desktop';
+import type { AgentCliDetails, AgentEngine, AgentOptionGroup, SourceSelection } from './desktop';
 import { analyze, businessDate, codexInput, createReport, fromSource, isMedia, isReportSource, period, quickPeriod, reportTitle, sections, supportedFiles } from './domain';
 import type { Analysis, ArtifactKind, Cadence, Evidence, Issue, Loaded, Locale, Location, Mapping, Narrative, Parsed, Report, ReportProfile, ReviewDecision, Settings, Source } from './domain';
 import { artifactName, assistantConversationTitle, assistantInput, assistantPresets, deleteArtifact, deleteReportArchive, storeArtifact, storeArtifacts, storedArtifacts, storeReportArchive, storeReportDraft, storedReports } from './office';
@@ -192,15 +192,17 @@ export default function App() {
   const [busy, setBusy] = useState(true);
   const [picking, setPicking] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [engineStatus, setEngineStatus] = useState('codex_checking');
+  const [cliStatus, setCliStatus] = useState('codex_checking');
   const [engineDetails, setEngineDetails] = useState<AgentCliDetails>();
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [assistantKnowledge, setAssistantKnowledge] = useState<{ scope: AssistantDatasetScope; attach: (items: Evidence[]) => void }>();
-  const [agentEngine, setAgentEngine] = useState<AgentEngine>(() => {
-    const saved = readLocal<string>('agent-engine', 'codex');
-    return saved === 'claude' || saved.startsWith('provider:') ? saved as AgentEngine : 'codex';
+  const [savedEngine, setAgentEngine] = useState<AgentEngine>(() => {
+    const saved = readLocal<unknown>('agent-engine', 'codex');
+    return saved === 'claude' || isProviderEngine(saved) ? saved : 'codex';
   });
-  const [providerProfiles, setProviderProfiles] = useState<ProviderProfile[]>([]);
+  const [loadedProviders, setProviderProfiles] = useState<ProviderProfile[]>();
+  const [providerCheck, setProviderCheck] = useState<{ profile: ProviderProfile; modelId: string; status: string }>();
+  const providerProfiles = loadedProviders ?? [];
   const [workflows, setWorkflows] = useState<OfficeWorkflow[]>(() => {
     const stored = readLocal<unknown>('office-workflows', []);
     return validWorkflows(stored) ? stored : [];
@@ -210,14 +212,30 @@ export default function App() {
   const [browserIntake, setBrowserIntake] = useState<BrowserIntake>();
   const workflowAbort = useRef<AbortController | undefined>(undefined);
   const [engineCheck, setEngineCheck] = useState(0);
-  const engineName = agentEngine === 'claude' ? 'Claude Code' : agentEngine === 'codex' ? 'Codex' :
-    providerProfiles.find(item => 'provider:' + item.id === agentEngine)?.name ?? t('models');
+  const target = savedEngine === 'codex' || savedEngine === 'claude' ? undefined : providerTarget(savedEngine);
+  const cliEngine = savedEngine === 'codex' || savedEngine === 'claude' ? savedEngine : undefined;
+  const activeProvider = target && providerProfiles.find(item => item.id === target.id);
+  const modelId = target?.modelId ?? activeProvider?.textModel;
+  const providerReady = Boolean(activeProvider && modelId && configuredModels(activeProvider).includes(modelId));
+  const agentEngine = activeProvider && modelId && providerReady ? providerEngine(activeProvider.id, modelId) : savedEngine;
+  const engineName = cliEngine === 'claude' ? 'Claude Code' : cliEngine === 'codex' ? 'Codex' : modelId ?? t('chooseAgentModel');
+  const engineStatus = cliEngine ? cliStatus : !nativeDesktop ? 'codexBrowser' : !loadedProviders ? 'codex_checking'
+    : !providerReady ? 'provider_model' : providerCheck && providerCheck.profile === activeProvider && providerCheck.modelId === modelId
+      ? providerCheck.status : 'provider_configured';
+  const engineOptions: AgentOptionGroup[] = [
+    { label: t('agentLocalCli'), options: [{ value: 'codex', label: 'Codex' }, { value: 'claude', label: 'Claude Code' }] },
+    ...providerProfiles.flatMap(profile => {
+      const models = configuredModels(profile);
+      const ids = profile.textModel ? [profile.textModel, ...models.filter(id => id !== profile.textModel)] : models;
+      return ids.length ? [{ label: profile.name, options: ids.map(id => ({ value: providerEngine(profile.id, id), label: id })) }] : [];
+    }),
+  ];
   const knowledgeModels = useMemo<KnowledgeModel[]>(() => providerProfiles.filter(item => item.embeddingModel).map(item => ({
     id: item.id, label: [item.name, item.embeddingModel].join(' · '),
     fingerprint: [item.id, item.baseUrl, item.embeddingModel].join('|'),
     embed: input => providerEmbeddings(item.id, input),
   })), [providerProfiles]);
-  const hasCodex = engineStatus === 'codex_ready';
+  const hasCodex = nativeDesktop && (cliEngine ? cliStatus === 'codex_ready' : providerReady);
   const [assistantRunning, setAssistantRunning] = useState(false);
   const [assistantWriting, setAssistantWriting] = useState(false);
   const [toolBusy, setToolBusy] = useState(false);
@@ -356,34 +374,49 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!cliEngine) return;
+    const engine = cliEngine;
     let current = true;
     async function detect() {
       try {
-        const details = nativeDesktop && (agentEngine === 'codex' || agentEngine === 'claude')
-          ? await agentCliDetails(agentEngine).catch(() => undefined) : undefined;
-        const status = details?.status ?? await codexStatus(agentEngine);
-        if (current) { setEngineDetails(details); setEngineStatus(status); }
-      } catch { if (current) { setEngineDetails(undefined); setEngineStatus('codex_failed'); } }
+        const details = nativeDesktop ? await agentCliDetails(engine).catch(() => undefined) : undefined;
+        const status = details?.status ?? await codexStatus(engine);
+        if (current) { setEngineDetails(details); setCliStatus(status); }
+      } catch { if (current) { setEngineDetails(undefined); setCliStatus('codex_failed'); } }
     }
     void detect();
     return () => { current = false; };
-  }, [agentEngine, engineCheck]);
+  }, [cliEngine, engineCheck]);
 
   async function refreshProviders() {
     if (nativeDesktop) setProviderProfiles(await listProviders());
   }
 
-  useEffect(() => { void refreshProviders().catch(() => undefined); }, []);
+  useEffect(() => { void refreshProviders().catch(() => setProviderProfiles([])); }, []);
 
   function recheckEngine() {
-    setEngineStatus('codex_checking');
+    if (activeProvider && modelId && providerReady) {
+      const check = { profile: activeProvider, modelId, status: 'codex_checking' };
+      setProviderCheck(check);
+      void testProvider(activeProvider.id, modelId).then(
+        () => setProviderCheck(current => current === check ? { ...check, status: 'codex_ready' } : current),
+        error => setProviderCheck(current => current === check ? { ...check, status: errorCode(error, 'provider_failed') } : current),
+      );
+      return;
+    }
+    setCliStatus('codex_checking');
     setEngineDetails(undefined);
     setEngineCheck(current => current + 1);
   }
 
   function selectAgentEngine(engine: AgentEngine) {
     if (engine === agentEngine || workspaceLocked) return;
-    if (persist('agent-engine', engine)) { setAgentEngine(engine); recheckEngine(); }
+    if (persist('agent-engine', engine)) {
+      setProviderCheck(undefined);
+      setCliStatus('codex_checking');
+      setEngineDetails(undefined);
+      setAgentEngine(engine);
+    }
   }
 
   useEffect(() => {
@@ -1019,7 +1052,7 @@ export default function App() {
         const kind = step.kind;
         if (isMedia(kind)) {
           const field = kind === 'png' ? 'imageModel' : kind === 'mp3' ? 'ttsModel' : 'videoModel';
-          const provider = providerProfiles.find(item => 'provider:' + item.id === agentEngine && item[field])
+          const provider = providerProfiles.find(item => item.id === target?.id && item[field])
             ?? providerProfiles.find(item => item[field]);
           if (!provider) throw 'provider_model';
           if (kind === 'mp4') {
@@ -1441,10 +1474,9 @@ export default function App() {
         <div className="breadcrumb"><strong>{t(page)}</strong>{sample && <Tag color="gold">{t('sampleBadge')}</Tag>}</div>
         <WorkspaceSearch files={loaded} artifacts={artifacts} pages={navigation.map(([key]) => ({ key, label: t(key) }))} navigate={key => navigate(key as Page)} material={id => setPreview({ type: 'material', id })} artifact={id => setPreview({ type: 'artifact', id })} locate={showLocation} />
         <div className="top-actions">
-          <Select<AgentEngine> aria-label={t('agentEngine')} variant="borderless" className="engine-select" value={agentEngine}
-            disabled={workspaceLocked} options={[{ value: 'codex', label: 'Codex' }, { value: 'claude', label: 'Claude Code' },
-              ...providerProfiles.filter(item => item.textModel).map(item => ({ value: `provider:${item.id}` as const, label: item.name }))]}
-            onChange={selectAgentEngine} />
+          {page !== 'assistant' && <Select<AgentEngine> aria-label={t('agentEngine')} variant="borderless" className="engine-select" value={agentEngine}
+            disabled={workspaceLocked} options={engineOptions} labelRender={() => engineName}
+            showSearch={{ optionFilterProp: 'label' }} popupMatchSelectWidth={280} onChange={selectAgentEngine} />}
           {assistantRunning && page !== 'assistant' && <Button type="text" icon={<ThunderboltOutlined />} onClick={() => setPage('assistant')}>{t('assistantReturnToTask')}</Button>}
         </div>
       </header>
@@ -1462,10 +1494,8 @@ export default function App() {
           onPreviewFile={(id, anchor) => setPreview({ type: 'material', id, anchor })}
           createDataset={(name, ids) => saveDataset(name, ids)} editDataset={(id, name, ids) => Boolean(saveDataset(name, ids, id))}
           deleteDataset={removeProfile} runReport={runDatasetReport} />}
-        {page === 'models' && <ModelWorkbench profiles={providerProfiles} changed={async () => {
-          await refreshProviders();
-          recheckEngine();
-        }} deliver={deliverArtifacts} openArtifacts={() => { setArtifactFilter(undefined); setPage('artifacts'); }} />}
+        {page === 'models' && <ModelWorkbench profiles={providerProfiles} changed={refreshProviders}
+          deliver={deliverArtifacts} openArtifacts={() => { setArtifactFilter(undefined); setPage('artifacts'); }} />}
         <div hidden={page !== 'media'}><ModelWorkbench media profiles={providerProfiles} changed={refreshProviders} deliver={deliverArtifacts}
           openArtifacts={() => { setArtifactFilter(undefined); setPage('artifacts'); }} /></div>
         {page === 'browser' && <BrowserWorkbench incoming={browserIntake} deliver={deliverArtifacts}
@@ -1484,7 +1514,7 @@ export default function App() {
         </div>
         <div hidden={page !== 'assistant'}>
           <OfficeAssistant files={loaded} hasCodex={hasCodex && !workflowBusy && !polishing && !creativeBusy && !datasetStage} running={assistantRunning} setRunning={setAssistantRunning} setWriting={setAssistantWriting}
-            engine={agentEngine} engineName={engineName}
+            engine={agentEngine} engineName={engineName} engineOptions={engineOptions} changeEngine={selectAgentEngine} engineLocked={workspaceLocked}
             openAgentSettings={() => setAgentSettingsOpen(true)} knowledgeModels={knowledgeModels}
             openKnowledge={(scope, attach) => setAssistantKnowledge({ scope, attach })}
             renderTaskContext={({ dataset, filenames, retrievalActive, locked, showScope }) => <TaskScopePicker profiles={profiles} dataset={dataset}
@@ -1503,7 +1533,7 @@ export default function App() {
             runDatasetCommand={runAssistantDatasetCommand} datasetCommandBusy={pptLocked}
             openTaskId={openTaskId} clearOpenTask={() => setOpenTaskId(undefined)} onTasksChange={setAssistantTasks}
             reference={assistantReference} clearReference={() => setAssistantReference(undefined)} showSourcesLoading={busy || picking}
-            engineStatus={engineStatus} checkEngine={recheckEngine}
+            engineStatus={engineStatus}
             pick={folder => { if (!locked) void pick(folder, 'assistant'); }} previewMaterial={id => setPreview({ type: 'material', id })}
             artifacts={artifacts} deliver={deliverArtifacts} preview={id => setPreview({ type: 'artifact', id })}
             saveFile={exportArtifact} exporting={exporting} show={setEvidence}

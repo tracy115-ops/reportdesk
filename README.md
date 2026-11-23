@@ -30,7 +30,9 @@
 
 ## 连接第三方模型
 
-从「设置 → Agent 设置 → 配置 API 模型」进入模型广场。添加供应商，选择服务支持的协议，填写 API 基址、API Key 和文本模型 ID。应用为 OpenAI 兼容服务追加 `/chat/completions`，为 Anthropic 兼容服务追加 `/messages`。保存并测试连接后，在助手的引擎列表中选择该模型。
+从「设置 → Agent 设置 → 配置 API 模型」进入模型广场。添加供应商，选择服务支持的协议，填写 API 基址和 API Key。点「拉取模型」后勾选所需模型，也可以手填模型 ID 并按 Enter 添加。每个供应商都可以保存多个对话模型和一个默认模型。
+
+从助手输入框旁的模型选择器切换模型。选定的模型也可用于文档和汇报。支持流式传输的服务会在生成时逐段显示对话回复。应用为 OpenAI 兼容服务追加 `/chat/completions`，为 Anthropic 兼容服务追加 `/messages`。
 
 Claude Code 可使用用户设置或环境变量配置第三方网关。若在 PowerShell 中设置变量，请从同一窗口启动办公工作台。在 Codex 中配置兼容 Responses API 的服务商后，可在助手的「工具」中选择工作目录，让 Codex 读取其 CLI 配置。
 
