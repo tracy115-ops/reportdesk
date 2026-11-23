@@ -1,0 +1,13 @@
+.mcp-panel { max-width: 860px; margin-inline: auto; }
+.mcp-panel .page-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.mcp-settings, .mcp-editor, .mcp-tool { display: grid; gap: 12px; }
+.mcp-settings { padding: 18px; }
+.mcp-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.mcp-row .ant-select { min-width: 170px; }
+.mcp-target { color: var(--muted, #626f64); overflow-wrap: anywhere; }
+.mcp-tool { justify-items: start; }
+.mcp-tool p, .mcp-result h2 { margin: 0; }
+.mcp-tool pre, .mcp-result pre { max-height: 310px; overflow: auto; background: #f4f7f1; padding: 9px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-result h2 { font-size: 15px; }
+.mcp-editor { padding-block: 8px; gap: 7px; }
+.mcp-editor label, .mcp-editor > span { font-size: 13px; }

@@ -1,0 +1,38 @@
+.task-scope-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px 9px;
+  min-width: 0;
+  width: 100%;
+  color: #64726a;
+  flex-wrap: wrap;
+}
+
+.task-scope-picker .task-scope-trigger.ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: start;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(100%, 320px);
+  height: 29px;
+  padding-inline: 8px;
+  border-color: #dce7dd;
+  border-radius: 7px;
+  box-shadow: none;
+  color: #355547;
+  background: #f7faf6;
+}
+
+.task-scope-picker[data-has-dataset='true'] .task-scope-trigger.ant-btn { border-color: #cfdfd3; background: #edf5ef; color: #255b48; }
+.task-scope-picker .task-scope-trigger.ant-btn:disabled { cursor: default; opacity: .66; }
+.task-scope-trigger .ant-btn-icon, .task-scope-chevron { flex: 0 0 auto; }
+.task-scope-chevron { font-size: 9px; }
+.task-scope-name, .task-scope-filename, .task-scope-option { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-scope-option { display: block; }
+.task-scope-menu .ant-dropdown-menu { width: min(340px, calc(100vw - 28px)); max-height: min(360px, 53vh); overflow: auto; }
+.task-scope-menu .ant-dropdown-menu-title-content { min-width: 0; }
+.task-scope-files { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; font-size: 12px; }
+.task-scope-count { flex: 0 0 auto; }
+.task-scope-filename::before { content: '·'; margin-inline-end: 5px; }
+.task-scope-filename { max-width: 240px; }
