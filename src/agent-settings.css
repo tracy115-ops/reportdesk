@@ -14,6 +14,7 @@
   border-inline-end: 1px solid var(--agent-line);
 }
 .agent-settings-engines h2, .agent-settings-engines h3 { margin: 0; padding-inline: 5px; color: var(--agent-muted); font-size: 12px; font-weight: 630; }
+.agent-settings-default-hint { margin: 0; padding-inline: 5px; color: var(--agent-muted); font-size: 11px; }
 .agent-settings-options { display: grid; gap: 4px; }
 .agent-settings-option {
   display: flex;

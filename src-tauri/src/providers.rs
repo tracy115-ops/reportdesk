@@ -1146,31 +1146,37 @@ async fn stream_text(
     let mut line = Vec::new();
     let mut received = 0;
     while !stream.done {
-        let Some(chunk) = response.chunk().await.map_err(network_error)? else {
-            stream.line(&line, kind)?;
-            stream.event(kind)?;
-            break;
-        };
-        received += chunk.len();
-        if received > JSON_LIMIT {
-            return Err("provider_output");
-        }
+        let chunk = response.chunk().await.map_err(network_error)?;
         let before = stream.text.len();
-        for piece in chunk.split_inclusive(|byte| *byte == b'\n') {
-            line.extend_from_slice(piece);
-            if piece.ends_with(b"\n") {
-                stream.line(&line, kind)?;
-                line.clear();
-                if stream.done {
-                    break;
+        let parsed = if let Some(chunk) = &chunk {
+            received += chunk.len();
+            if received > JSON_LIMIT {
+                return Err("provider_output");
+            }
+            let mut parsed = Ok(());
+            for piece in chunk.split_inclusive(|byte| *byte == b'\n') {
+                line.extend_from_slice(piece);
+                if piece.ends_with(b"\n") {
+                    parsed = stream.line(&line, kind);
+                    line.clear();
+                    if parsed.is_err() || stream.done {
+                        break;
+                    }
                 }
             }
-        }
+            parsed
+        } else {
+            stream.line(&line, kind).and_then(|_| stream.event(kind))
+        };
         if stream.text.len() > before {
             let _ = channel.send(vec![AgentEvent::Text {
                 text: stream.text[before..].to_owned(),
                 replace: false,
             }]);
+        }
+        parsed?;
+        if chunk.is_none() {
+            break;
         }
     }
     if !stream.done {

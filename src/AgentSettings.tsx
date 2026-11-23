@@ -29,6 +29,7 @@ const copy = {
   zh: {
     title: 'Agent 设置',
     engine: '默认引擎',
+    defaultHint: '用于新会话和工作台。',
     terminal: '本机命令行',
     api: 'API 模型',
     configure: '配置 API 模型',
@@ -66,6 +67,7 @@ const copy = {
   en: {
     title: 'Agent settings',
     engine: 'Default engine',
+    defaultHint: 'Used for new chats and workbench tasks.',
     terminal: 'Local command line',
     api: 'API models',
     configure: 'Configure API models',
@@ -145,6 +147,7 @@ export default function AgentSettings({ open, engine, status, details, profiles,
     <div className="agent-settings-layout">
       <div className="agent-settings-engines">
         <h2>{labels.engine}</h2>
+        <p className="agent-settings-default-hint">{labels.defaultHint}</p>
         <div className="agent-settings-options">{option('codex', 'Codex', labels.terminal)}{option('claude', 'Claude Code', labels.terminal)}</div>
         <div className="agent-settings-providers">
           <h3>{labels.api}</h3>

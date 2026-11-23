@@ -3,8 +3,9 @@ import { Alert, App as AntApp, Button, Drawer, Dropdown, Grid, Input, Modal, Sel
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { cancelPolish, chatWithAgent, errorCode, nativeDesktop, openAgentFolder, openAgentTerminal, pickAgentFolder, runOffice } from './desktop';
+import { cancelPolish, chatWithAgent, errorCode, isAgentEngine, nativeDesktop, openAgentFolder, openAgentTerminal, pickAgentFolder, runOffice } from './desktop';
 import type { AgentEngine, AgentOptionGroup, AgentWorkspaceChanges } from './desktop';
+import type { AgentConnection } from './agent-connections';
 import { evidenceSignature, quickPeriod } from './domain';
 import type { ArtifactKind, Evidence, Loaded, Locale } from './domain';
 import { assistantConversationTitle, assistantInput, assistantPresets, assistantVersion, conversationPath, conversationVersions, datasetExcerpts, deleteTask, storedTasks, storeTask, storeTaskResult, taskVersions } from './office';
@@ -29,7 +30,8 @@ function blankTask(locale: Locale): AssistantTask {
   return { id: crypto.randomUUID(), request: '', locale, format: 'answer', attachments: [], revise: false, status: 'idle', updatedAt: new Date().toISOString() };
 }
 
-function resumeTask(task: AssistantTask): AssistantTask {
+function resumeTask(saved: AssistantTask, defaultEngine: AgentEngine): AssistantTask {
+  const task = isAgentEngine(saved.engine) ? saved : { ...saved, engine: saved.status === 'idle' ? undefined : defaultEngine };
   if (task.status === 'running') return { ...task, status: 'interrupted' };
   if (task.draft && task.status === 'complete' && !task.revise && task.submittedRequest === undefined) {
     return { ...task, submittedRequest: task.request, request: '', revise: true };
@@ -65,10 +67,12 @@ function UserMessage({ request, branch, disabled }: { request: string; branch?: 
   </div>;
 }
 
-function ReplyAuthor() {
+function ReplyAuthor({ model, incomplete }: { model?: string; incomplete?: boolean }) {
   const { t } = useTranslation();
   return <div className="assistant-message-meta assistant-answer-meta">
     <span className="assistant-answer-mark"><ThunderboltOutlined aria-hidden /></span><strong>{t('assistant')}</strong>
+    {model && <span className="assistant-reply-model" title={model}>{model}</span>}
+    {incomplete && <span className="assistant-incomplete">{t('assistantIncompleteReply')}</span>}
   </div>;
 }
 
@@ -86,13 +90,13 @@ function ReplyContent({ draft, show }: { draft: AssistantDraft; show: (ref: Evid
 
 interface Props {
   files: Loaded[];
-  hasCodex: boolean;
-  engine: AgentEngine;
-  engineName: string;
+  agentBusy: boolean;
+  defaultEngine: AgentEngine;
   engineOptions: AgentOptionGroup[];
   engineLocked: boolean;
-  engineStatus: string;
-  changeEngine: (engine: AgentEngine) => void;
+  resolveAgent: (engine: AgentEngine) => AgentConnection;
+  prepareEngine: (engine: AgentEngine) => Promise<void>;
+  recheckEngine: (engine: AgentEngine) => void;
   openAgentSettings: () => void;
   openKnowledge?: (scope: AssistantDatasetScope, addExcerpts: (items: Evidence[]) => void) => void;
   knowledgeModels?: readonly KnowledgeModel[];
@@ -117,7 +121,7 @@ interface Props {
   openTaskId?: string;
   clearOpenTask?: () => void;
   onTasksChange?: (tasks: AssistantTask[]) => void;
-  runDatasetCommand?: (id: string, request: string, plan: OfficeCommandPlan) => Promise<boolean>;
+  runDatasetCommand?: (id: string, request: string, plan: OfficeCommandPlan, agent: AgentConnection) => Promise<boolean>;
   datasetCommandBusy?: boolean;
   renderTaskContext?: (context: {
     dataset?: AssistantDatasetScope;
@@ -129,7 +133,7 @@ interface Props {
   }) => ReactNode;
 }
 
-export default function OfficeAssistant({ files, hasCodex, engine, engineName, engineOptions, engineLocked, engineStatus, changeEngine,
+export default function OfficeAssistant({ files, agentBusy, defaultEngine, engineOptions, engineLocked, resolveAgent, prepareEngine, recheckEngine,
   openAgentSettings, openKnowledge, knowledgeModels = [], running, setRunning, setWriting, pick, previewMaterial,
   artifacts, deliver, preview, saveFile, exporting, show, reference, clearReference, showSourcesLoading, openCreative,
   newTaskSignal, openLibrary, openArtifacts, openTaskId, clearOpenTask, onTasksChange, runDatasetCommand, datasetCommandBusy, renderTaskContext }: Props) {
@@ -137,9 +141,13 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
   const { message } = AntApp.useApp();
   const [task, setTask] = useState(() => {
     const saved = readLocal('active-assistant', blankTask(i18n.language as Locale));
-    return resumeTask(saved);
+    return resumeTask(saved, defaultEngine);
   });
   const { request, locale, draft, attachments, dataset, agentFolder } = task;
+  const agent = resolveAgent(task.engine ?? defaultEngine);
+  const { engine, name: engineName, status: engineStatus } = agent;
+  const hasCodex = agent.ready && !agentBusy;
+  const replyModel = agent.profile ? `${agent.profile.name} · ${engineName}` : engineName;
   const [history, setHistory] = useState<AssistantTask[]>([]);
   const [historyReady, setHistoryReady] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -172,6 +180,7 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
   const followReply = useRef(true);
   const locked = running || creating || saving || runningReport;
   const switchingBlocked = locked || previewingInput || pickingFolder || savingConversation || Boolean(datasetCommandBusy);
+  const stoppedReply = !running && (task.status === 'failed' || task.status === 'interrupted') ? task.interruptedReply : undefined;
   const pinned = useMemo(() => dataset && task.pinned ? datasetExcerpts(dataset, task.pinned) : task.pinned ?? [], [dataset, task.pinned]);
   const imported = useMemo(() => files.filter(file => file.parsed), [files]);
   const scopedFiles = useMemo(() => {
@@ -224,6 +233,11 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
   const earlier = thread.slice(0, -1);
   const [scopePickerVersion, setScopePickerVersion] = useState(0);
   const seenNewTask = useRef(newTaskSignal);
+
+  useEffect(() => { void prepareEngine(engine); }, [engine, prepareEngine]);
+  useEffect(() => {
+    if (task.engine && task.engine !== engine) setActive({ ...task, engine });
+  }, [task, engine]);
   useEffect(() => {
     if (seenNewTask.current === newTaskSignal || switchingBlocked || changingConversation.current) return;
     seenNewTask.current = newTaskSignal;
@@ -348,6 +362,11 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
     setActive({ ...task, ...patch, updatedAt: new Date().toISOString() });
   }
 
+  function changeEngine(next: AgentEngine) {
+    if (engineLocked || switchingBlocked || changingConversation.current || next === engine) return;
+    update({ engine: next });
+  }
+
   async function archive(next: AssistantTask) {
     try {
       await storeTask(next);
@@ -448,31 +467,35 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
     if (input.degraded) message.info(t('assistant_rag_degraded'));
     const { payload, refs } = input;
     setPhase('draft');
-    const current: AssistantTask = { ...task, status: 'running', error: undefined, failedChanges: undefined, updatedAt: new Date().toISOString() };
+    const current: AssistantTask = { ...task, engine, status: 'running', error: undefined, failedChanges: undefined, updatedAt: new Date().toISOString() };
     setActive(current);
     let acceptingProgress = true;
+    let progress: AgentRunProgress = { text: '', tools: [] };
     let changes: AgentWorkspaceChanges | undefined;
     try {
       let result: AssistantDraft;
       if (format === 'answer') {
         const reply = await chatWithAgent(payload, engine, workspace, events => {
-          if (acceptingProgress) setRunProgress(previous => addAgentEvents(previous ?? { text: '', tools: [] }, events));
+          if (acceptingProgress) {
+            progress = addAgentEvents(progress, events);
+            setRunProgress(progress);
+          }
         });
         changes = reply.changes;
         if (reply.error || !reply.text) throw reply.error ?? 'codex_output';
         const title = inputRequest.replace(/\s+/g, ' ').slice(0, 72);
         result = { value: { title, sections: [{ heading: '', text: reply.text }] }, reply: true, deniedTools: reply.deniedTools,
-          changes, refs, language: locale, format };
+          changes, refs, language: locale, format, model: replyModel };
       } else {
         const value = await runOffice(payload, locale, engine);
         const allowed = new Set(refs.map(ref => ref.id));
         const clean = (text: string) => text.replace(/\[(S\d+)\]/g, (match, id: string) => allowed.has(id) ? match : '');
         result = { value: { title: clean(value.title), sections: value.sections.map(section => ({ heading: clean(section.heading), text: clean(section.text) })) },
-          refs, language: locale, format };
+          refs, language: locale, format, model: replyModel };
       }
       const next: AssistantTask = { ...current, status: 'complete', revise: true, request: '', submittedRequest: current.request.trim(), forkFromId: undefined,
         updatedAt: new Date().toISOString(), delivery: crypto.randomUUID(),
-        deliveryError: undefined, retryKinds: undefined, format: 'answer', draft: result };
+        deliveryError: undefined, retryKinds: undefined, interruptedReply: undefined, format: 'answer', draft: result };
       acceptingProgress = false;
       const committed = await commitResult(next, assistantVersion(next, 'generatedVersion', parentId)!, task);
       setRunProgress(undefined);
@@ -485,10 +508,12 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
       focusResult();
     } catch (error) {
       const code = errorCode(error, 'codex_failed');
-      const next: AssistantTask = { ...current, status: 'failed', error: code, failedChanges: changes, updatedAt: new Date().toISOString() };
+      acceptingProgress = false;
+      const text = progress.text.trim();
+      const interruptedReply = text ? { request: current.request.trim(), text, model: replyModel } : current.interruptedReply;
+      const next: AssistantTask = { ...current, status: 'failed', error: code, failedChanges: changes, interruptedReply, updatedAt: new Date().toISOString() };
       setActive(next);
       await archive(next);
-      if (code === 'codex_cancelled') message.info(t('codexStopped'));
     } finally {
       acceptingProgress = false;
       setRunProgress(undefined);
@@ -502,7 +527,7 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
     if (!reportPlan || !dataset || !runDatasetCommand) return execute();
     setRunningReport(true);
     try {
-      if (await runDatasetCommand(dataset.id, request.trim(), reportPlan)) update({ request: '' });
+      if (await runDatasetCommand(dataset.id, request.trim(), reportPlan, agent)) update({ engine, request: '', interruptedReply: undefined });
     } catch { message.error(t('assistantReportFailed')); }
     finally { setRunningReport(false); }
   }
@@ -592,9 +617,9 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
     if (switchingBlocked || historyLoading || forkFrom) return;
     if (draft && JSON.stringify(value) === JSON.stringify(draft.value)) { setEditing(undefined); return; }
     const revised = { ...(draft ?? { refs: [], language: locale, format }), value };
-    const next: AssistantTask = { ...task, status: 'complete', revise: true, error: undefined,
+    const next: AssistantTask = { ...task, engine, status: 'complete', revise: true, error: undefined,
       request: draft ? task.request : '', submittedRequest: draft ? task.submittedRequest : task.request.trim() || undefined,
-      draft: revised, delivery: crypto.randomUUID(), deliveryError: undefined, retryKinds: undefined, updatedAt: new Date().toISOString() };
+      draft: revised, interruptedReply: undefined, delivery: crypto.randomUUID(), deliveryError: undefined, retryKinds: undefined, updatedAt: new Date().toISOString() };
     const committed = await commitResult(next, assistantVersion(next, 'editedVersion', activeTurn?.parentId ?? null)!, task);
     setEditing(undefined);
     const kinds = (['docx', 'pptx'] as const).filter(kind => revised.format === kind || revised.format === 'bundle' || outputs.some(file => file.kind === kind));
@@ -605,7 +630,7 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
   async function restoreVersion(version: AssistantVersion) {
     if (switchingBlocked) return;
     const next: AssistantTask = { ...task, ...version.task, dataset: version.task.dataset, agentFolder: version.task.agentFolder, request: '', format: 'answer', submittedRequest: version.task.request, forkFromId: undefined, delivery: version.id, revise: true, status: 'complete', error: undefined,
-      deliveryError: undefined, retryKinds: undefined, failedChanges: undefined, updatedAt: new Date().toISOString() };
+      deliveryError: undefined, retryKinds: undefined, failedChanges: undefined, interruptedReply: undefined, updatedAt: new Date().toISOString() };
     await commitResult(next, version, task);
     setVersionPreview(undefined);
     setVersionsOpen(false);
@@ -615,7 +640,7 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
   function branchFrom(version: AssistantVersion) {
     if (locked || !version.task.request.trim()) return;
     const { dataset, retrieval, agentFolder, attachments, pinned, request, format, locale } = version.task;
-    update({ forkFromId: version.id, request, dataset, retrieval, agentFolder, attachments, pinned, format, locale, error: undefined, failedChanges: undefined, status: 'complete' });
+    update({ forkFromId: version.id, request, dataset, retrieval, agentFolder, attachments, pinned, format, locale, error: undefined, failedChanges: undefined, interruptedReply: undefined, status: 'complete' });
     setInputPreview(undefined);
     setVersionPreview(undefined);
     setVersionsOpen(false);
@@ -653,6 +678,10 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
     });
   }
 
+  function copyReply(text: string) {
+    void navigator.clipboard.writeText(text).then(() => message.success(t('copied'))).catch(() => message.error(t('file_access')));
+  }
+
   function chooseCommand(item: typeof assistantCommands[number]) {
     const text = command?.text ?? (commandPrefix === undefined ? request.trim() : '');
     update({ request: '/' + (zh ? item.zh : item.en) + ' ' + text });
@@ -671,7 +700,7 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
   }
 
   async function openTask(item: AssistantTask) {
-    if (item.id === task.id || await switchConversation(resumeTask(item), false)) setHistoryOpen(false);
+    if (item.id === task.id || await switchConversation(resumeTask(item, defaultEngine), false)) setHistoryOpen(false);
   }
 
   async function newConversation() {
@@ -736,12 +765,18 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
     locked: switchingBlocked, hasDraft: Boolean(draft), showScope,
   });
   const engineControl = <Tooltip title={readyText}>
-    <Select<AgentEngine | 'settings'> className="assistant-engine" variant="borderless" value={engine} disabled={engineLocked}
-      aria-label={t('chooseAgentModel')} placement="topRight" popupMatchSelectWidth={300} showSearch={{ optionFilterProp: 'label' }}
+    <Select<AgentEngine | 'check' | 'settings'> className="assistant-engine" variant="borderless" value={engine} disabled={engineLocked}
+      aria-label={t('assistantConversationModel')} placement="topRight" popupMatchSelectWidth={300} showSearch={{ optionFilterProp: 'label' }}
       prefix={<span className={engineReady ? 'assistant-engine-ready' : 'assistant-engine-waiting'} aria-hidden />}
-      options={[...engineOptions, { value: 'settings', label: t('agentSettings') }]}
+      options={[...engineOptions,
+        { value: 'check', label: t('checkEngine'), disabled: !nativeDesktop || engineStatus === 'codex_checking' || engineStatus === 'provider_model' },
+        { value: 'settings', label: t('agentSettings') }]}
       labelRender={() => <span className="assistant-engine-label" title={engineName}>{engineName}</span>}
-      onChange={next => { if (next === 'settings') openAgentSettings(); else changeEngine(next); }} />
+      onChange={next => {
+        if (next === 'settings') openAgentSettings();
+        else if (next === 'check') recheckEngine(engine);
+        else changeEngine(next);
+      }} />
   </Tooltip>;
   const commandControl = <Dropdown trigger={['click']} placement="topLeft" open={commandsOpen && !locked && commandChoices.length > 0}
     onOpenChange={open => { setCommandsOpen(open); setCommandIndex(0); }}
@@ -823,7 +858,7 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
           const previous = version.task.draft;
           return <div className="assistant-turn" key={version.id}>
             {version.task.request && <UserMessage request={version.task.request} branch={() => branchFrom(version)} disabled={locked} />}
-            {previous.format === 'answer' ? <><ReplyAuthor /><article className="assistant-reply" lang={previous.language}>
+            {previous.format === 'answer' ? <><ReplyAuthor model={previous.model} /><article className="assistant-reply" lang={previous.language}>
               <ReplyContent draft={previous} show={show} />
             </article></> : <details className="assistant-turn-draft">
               <summary><span>{previous.value.title}</span><small className="assistant-turn-meta">{t(version.change)}</small></summary>
@@ -838,15 +873,14 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
         })}
       </div>}
       {shownRequest && <UserMessage request={shownRequest} branch={activeTurn ? () => branchFrom(activeTurn) : undefined} disabled={locked} />}
-      {draft && <><ReplyAuthor />
+      {draft && <><ReplyAuthor model={draft.model} />
       {chatReply ? <article className="assistant-reply" ref={resultRef} tabIndex={-1} lang={draft.language}>
         <ReplyContent draft={draft} show={show} />
         {exportedFiles}
         {deliveryError}
         {Boolean(draft.deniedTools) && <Alert type="info" showIcon title={t('agentToolsDenied', { count: draft.deniedTools })} />}
         <div className="assistant-reply-actions">
-          <Button type="text" size="small" icon={<CopyOutlined />} onClick={() =>
-            void navigator.clipboard.writeText(draft.value.sections.map(part => part.text).join('\n\n')).then(() => message.success(t('copied'))).catch(() => message.error(t('file_access')))}>{t('copyDraft')}</Button>
+          <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyReply(draft.value.sections.map(part => part.text).join('\n\n'))}>{t('copyDraft')}</Button>
           {usedSources.length > 0 && <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => setSourcesOpen(true)}>{t('assistantSourceCount', { count: usedSources.length })}</Button>}
           <Button type="text" size="small" icon={<BranchesOutlined />} disabled={historyLoading} onClick={() => setVersionsOpen(true)}>{t('assistantBranches')}</Button>
           {!draft.reply && <Dropdown trigger={['click']} menu={{
@@ -899,10 +933,20 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
       {running && runProgress && <>
         <AgentActivity tools={runProgress.tools} />
         {runProgress.text && <article className="assistant-reply agent-live-reply">
-          <ReplyAuthor />
+          <ReplyAuthor model={replyModel} />
           <AssistantReply text={runProgress.text} refs={[]} show={show} />
         </article>}
       </>}
+      {stoppedReply && <div className="assistant-turn assistant-interrupted-turn">
+        <UserMessage request={stoppedReply.request} />
+        <ReplyAuthor model={stoppedReply.model} incomplete />
+        <article className="assistant-reply">
+          <AssistantReply text={stoppedReply.text} refs={[]} show={show} />
+          <div className="assistant-reply-actions">
+            <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyReply(stoppedReply.text)}>{t('copyDraft')}</Button>
+          </div>
+        </article>
+      </div>}
       {locked && <TaskProgress since={running ? started : undefined} label={t(creating || phase === 'files' && running
         ? 'buildingFiles' : stopping ? 'agentStopping' : saving ? 'assistantSavingDraft' : phase === 'retrieve' && running ? 'assistant_rag_searching' : responseStatus, engineCopy)} />}
     </section>}
@@ -924,7 +968,7 @@ export default function OfficeAssistant({ files, hasCodex, engine, engineName, e
       </section>}
       {task.status === 'interrupted' && <Alert type="info" showIcon title={t('interruptedTask')} />}
       {task.status === 'failed' && <Alert type={task.error === 'codex_cancelled' ? 'info' : 'error'} showIcon
-        title={task.error === 'codex_cancelled' ? t('codexStopped') : t(task.error ?? 'codex_failed', { ...engineCopy, defaultValue: t('codex_failed', engineCopy) })}
+        title={task.error === 'codex_cancelled' ? t('assistantTaskStopped') : t(task.error ?? 'codex_failed', { ...engineCopy, defaultValue: t('codex_failed', engineCopy) })}
         action={task.error === 'codex_auth' || task.error === 'codex_missing' || task.error === 'codex_version' || task.error === 'codex_network'
           ? <Button size="small" onClick={openAgentSettings}>{t('assistantConnection', engineCopy)}</Button> : undefined} />}
       {task.status === 'failed' && <AgentFileChanges changes={task.failedChanges} />}

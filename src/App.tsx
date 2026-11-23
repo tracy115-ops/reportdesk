@@ -26,8 +26,10 @@ import WorkflowWorkbench from './WorkflowWorkbench';
 import McpPanel from './McpPanel';
 import { deleteKnowledgeIndex } from './knowledge-index';
 import type { KnowledgeModel } from './knowledge-index';
-import { configuredModels, isProviderEngine, listProviders, providerEmbeddings, providerEngine, providerMedia, providerTarget, startVideo, testProvider, videoStatus } from './provider-client';
+import { configuredModels, listProviders, providerEmbeddings, providerEngine, providerMedia, startVideo, videoStatus } from './provider-client';
 import type { ProviderProfile } from './provider-client';
+import { useAgentConnections } from './agent-connections';
+import type { AgentConnection } from './agent-connections';
 import { mcpCall } from './mcp-client';
 import { expandWorkflow, matchingWorkflows, runWorkflow, validWorkflows, workflowArguments } from './office-workflows';
 import type { OfficeWorkflow, StepUpdate, WorkflowRun } from './office-workflows';
@@ -53,10 +55,10 @@ import WorkspaceBackup from './WorkspaceBackup';
 import WorkspaceSearch from './WorkspaceSearch';
 import { Blank, EvidenceDrawer, MetricStrip, Review } from './Review';
 import {
-  addBrowserFiles, agentCliDetails, cancelPolish, codexStatus, demoSource, errorCode, FILE_LIMIT, saveArtifact, listSources,
+  addBrowserFiles, cancelPolish, demoSource, errorCode, FILE_LIMIT, isAgentEngine, saveArtifact, listSources,
   loadMaterials, nativeDesktop, openArtifact, openMaterial, parseArtifact, pickSources, polishReport, readMaterial, relinkSource, removeSource, runOffice,
 } from './desktop';
-import type { AgentCliDetails, AgentEngine, AgentOptionGroup, SourceSelection } from './desktop';
+import type { AgentEngine, AgentOptionGroup, SourceSelection } from './desktop';
 import { analyze, businessDate, codexInput, createReport, fromSource, isMedia, isReportSource, period, quickPeriod, reportTitle, sections, supportedFiles } from './domain';
 import type { Analysis, ArtifactKind, Cadence, Evidence, Issue, Loaded, Locale, Location, Mapping, Narrative, Parsed, Report, ReportProfile, ReviewDecision, Settings, Source } from './domain';
 import { artifactName, assistantConversationTitle, assistantInput, assistantPresets, deleteArtifact, deleteReportArchive, storeArtifact, storeArtifacts, storedArtifacts, storeReportArchive, storeReportDraft, storedReports } from './office';
@@ -192,17 +194,17 @@ export default function App() {
   const [busy, setBusy] = useState(true);
   const [picking, setPicking] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [cliStatus, setCliStatus] = useState('codex_checking');
-  const [engineDetails, setEngineDetails] = useState<AgentCliDetails>();
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [assistantKnowledge, setAssistantKnowledge] = useState<{ scope: AssistantDatasetScope; attach: (items: Evidence[]) => void }>();
   const [savedEngine, setAgentEngine] = useState<AgentEngine>(() => {
     const saved = readLocal<unknown>('agent-engine', 'codex');
-    return saved === 'claude' || isProviderEngine(saved) ? saved : 'codex';
+    return isAgentEngine(saved) ? saved : 'codex';
   });
   const [loadedProviders, setProviderProfiles] = useState<ProviderProfile[]>();
-  const [providerCheck, setProviderCheck] = useState<{ profile: ProviderProfile; modelId: string; status: string }>();
   const providerProfiles = loadedProviders ?? [];
+  const { resolve: resolveAgent, checkCli, recheck } = useAgentConnections(loadedProviders, t('chooseAgentModel'));
+  const defaultAgent = resolveAgent(savedEngine);
+  const { engine: agentEngine, name: engineName, details: engineDetails, status: engineStatus, ready: hasCodex } = defaultAgent;
   const [workflows, setWorkflows] = useState<OfficeWorkflow[]>(() => {
     const stored = readLocal<unknown>('office-workflows', []);
     return validWorkflows(stored) ? stored : [];
@@ -211,17 +213,6 @@ export default function App() {
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [browserIntake, setBrowserIntake] = useState<BrowserIntake>();
   const workflowAbort = useRef<AbortController | undefined>(undefined);
-  const [engineCheck, setEngineCheck] = useState(0);
-  const target = savedEngine === 'codex' || savedEngine === 'claude' ? undefined : providerTarget(savedEngine);
-  const cliEngine = savedEngine === 'codex' || savedEngine === 'claude' ? savedEngine : undefined;
-  const activeProvider = target && providerProfiles.find(item => item.id === target.id);
-  const modelId = target?.modelId ?? activeProvider?.textModel;
-  const providerReady = Boolean(activeProvider && modelId && configuredModels(activeProvider).includes(modelId));
-  const agentEngine = activeProvider && modelId && providerReady ? providerEngine(activeProvider.id, modelId) : savedEngine;
-  const engineName = cliEngine === 'claude' ? 'Claude Code' : cliEngine === 'codex' ? 'Codex' : modelId ?? t('chooseAgentModel');
-  const engineStatus = cliEngine ? cliStatus : !nativeDesktop ? 'codexBrowser' : !loadedProviders ? 'codex_checking'
-    : !providerReady ? 'provider_model' : providerCheck && providerCheck.profile === activeProvider && providerCheck.modelId === modelId
-      ? providerCheck.status : 'provider_configured';
   const engineOptions: AgentOptionGroup[] = [
     { label: t('agentLocalCli'), options: [{ value: 'codex', label: 'Codex' }, { value: 'claude', label: 'Claude Code' }] },
     ...providerProfiles.flatMap(profile => {
@@ -235,7 +226,6 @@ export default function App() {
     fingerprint: [item.id, item.baseUrl, item.embeddingModel].join('|'),
     embed: input => providerEmbeddings(item.id, input),
   })), [providerProfiles]);
-  const hasCodex = nativeDesktop && (cliEngine ? cliStatus === 'codex_ready' : providerReady);
   const [assistantRunning, setAssistantRunning] = useState(false);
   const [assistantWriting, setAssistantWriting] = useState(false);
   const [toolBusy, setToolBusy] = useState(false);
@@ -373,20 +363,7 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!cliEngine) return;
-    const engine = cliEngine;
-    let current = true;
-    async function detect() {
-      try {
-        const details = nativeDesktop ? await agentCliDetails(engine).catch(() => undefined) : undefined;
-        const status = details?.status ?? await codexStatus(engine);
-        if (current) { setEngineDetails(details); setCliStatus(status); }
-      } catch { if (current) { setEngineDetails(undefined); setCliStatus('codex_failed'); } }
-    }
-    void detect();
-    return () => { current = false; };
-  }, [cliEngine, engineCheck]);
+  useEffect(() => { void checkCli(savedEngine); }, [savedEngine, checkCli]);
 
   async function refreshProviders() {
     if (nativeDesktop) setProviderProfiles(await listProviders());
@@ -394,29 +371,9 @@ export default function App() {
 
   useEffect(() => { void refreshProviders().catch(() => setProviderProfiles([])); }, []);
 
-  function recheckEngine() {
-    if (activeProvider && modelId && providerReady) {
-      const check = { profile: activeProvider, modelId, status: 'codex_checking' };
-      setProviderCheck(check);
-      void testProvider(activeProvider.id, modelId).then(
-        () => setProviderCheck(current => current === check ? { ...check, status: 'codex_ready' } : current),
-        error => setProviderCheck(current => current === check ? { ...check, status: errorCode(error, 'provider_failed') } : current),
-      );
-      return;
-    }
-    setCliStatus('codex_checking');
-    setEngineDetails(undefined);
-    setEngineCheck(current => current + 1);
-  }
-
   function selectAgentEngine(engine: AgentEngine) {
     if (engine === agentEngine || workspaceLocked) return;
-    if (persist('agent-engine', engine)) {
-      setProviderCheck(undefined);
-      setCliStatus('codex_checking');
-      setEngineDetails(undefined);
-      setAgentEngine(engine);
-    }
+    if (persist('agent-engine', engine)) setAgentEngine(engine);
   }
 
   useEffect(() => {
@@ -574,7 +531,7 @@ export default function App() {
     };
   }
 
-  const trError = (error: unknown, fallback = 'file_access') => t(errorCode(error, fallback), { engine: engineName, defaultValue: t(fallback, { engine: engineName }) });
+  const trError = (error: unknown, fallback = 'file_access', name = engineName) => t(errorCode(error, fallback), { engine: name, defaultValue: t(fallback, { engine: name }) });
 
   function persist(name: string, value: unknown) {
     try { writeLocal(name, value); return true; }
@@ -930,12 +887,13 @@ export default function App() {
     if (await applyDraft(next, previous)) setTab('preview');
   }
 
-  async function runDatasetReport(id: string, cadence: Cadence, instructions: string, withAgent: boolean, previousPeriod: boolean, outputs: ArtifactKind[] = []) {
+  async function runDatasetReport(id: string, cadence: Cadence, instructions: string, withAgent: boolean, previousPeriod: boolean,
+    outputs: ArtifactKind[] = [], agent = defaultAgent) {
     const profile = profiles.find(item => item.id === id);
     const reportSources = profile?.sourceIds;
     if (!profile || !reportSources?.length || pptLocked || !reportsReady || datasetRun.current) return false;
     const nextSettings = { ...profile.settings, ...quickPeriod(cadence, previousPeriod) };
-    if (withAgent && !hasCodex) { message.warning(t('codexMissingDesktop', { engine: engineName })); return false; }
+    if (withAgent && !agent.ready) { message.warning(t(agent.status, { engine: agent.name })); return false; }
     const key = reportReviewKey(nextSettings, false, id);
     const legacy = legacyDatasetReviewKey(nextSettings, false, id);
     const currentDecisions = decisions[key] ?? (legacy ? decisions[legacy] : undefined);
@@ -967,9 +925,9 @@ export default function App() {
       setTab('preview');
       if (!outputs.length) setPage('current');
       let finished: SavedReport = next;
-      if (withAgent && hasCodex) {
+      if (withAgent) {
         setDatasetStage('agent');
-        const polished = await polishDraft(next, data, instructions);
+        const polished = await polishDraft(next, data, instructions, agent);
         if (polished) finished = polished;
         else {
           message.info(t('datasetBaseSaved'));
@@ -984,18 +942,18 @@ export default function App() {
     }
   }
 
-  async function runOfficeCommand(id: string, request: string, plan: OfficeCommandPlan) {
+  async function runOfficeCommand(id: string, request: string, plan: OfficeCommandPlan, agent?: AgentConnection) {
     if (workspaceLocked) return false;
     const matches = matchingWorkflows(workflows, request);
     if (matches.length === 1) {
-      setWorkflowIncoming({ workflow: matches[0]!, datasetId: id, request, token: crypto.randomUUID() });
+      setWorkflowIncoming({ workflow: matches[0]!, datasetId: id, request, token: crypto.randomUUID(), engine: agent?.engine });
       setPage('workflows');
       return true;
     }
     if (matches.length > 1) { setPage('workflows'); message.info(t('workflow_ambiguous')); return false; }
     if (plan.kind === 'clarify') return false;
     if (plan.kind === 'agent') return Boolean(await openDatasetAgent(id, request, plan.format));
-    return runDatasetReport(id, plan.cadence, request, plan.withAgent, plan.previous, plan.outputs);
+    return runDatasetReport(id, plan.cadence, request, plan.withAgent, plan.previous, plan.outputs, agent);
   }
 
   async function executeWorkflow(job: WorkflowRun, update: StepUpdate) {
@@ -1005,6 +963,7 @@ export default function App() {
     workflowAbort.current = controller;
     setWorkflowBusy(true);
     const group = 'workflow-' + job.token;
+    const agent = job.engine ? resolveAgent(job.engine) : defaultAgent;
     const profile = profiles.find(item => item.id === job.datasetId);
     let draft: import('./office').OfficeDraft | undefined;
     let refs: Evidence[] = [];
@@ -1041,9 +1000,9 @@ export default function App() {
           return { text: Object.values(report.narrative).join('\n\n') };
         }
         if (step.kind === 'draft') {
-          if (!hasCodex) throw 'provider_missing';
+          if (!agent.ready) throw 'provider_missing';
           const input = assistantInput(prompt, 'answer', files, [], undefined);
-          draft = await runOffice(input.payload, locale, agentEngine);
+          draft = await runOffice(input.payload, locale, agent.engine);
           refs = input.refs;
           deck = undefined;
           return { text: draft.sections.map(section => section.text).join('\n\n') };
@@ -1052,7 +1011,7 @@ export default function App() {
         const kind = step.kind;
         if (isMedia(kind)) {
           const field = kind === 'png' ? 'imageModel' : kind === 'mp3' ? 'ttsModel' : 'videoModel';
-          const provider = providerProfiles.find(item => item.id === target?.id && item[field])
+          const provider = providerProfiles.find(item => item.id === agent.profile?.id && item[field])
             ?? providerProfiles.find(item => item[field]);
           if (!provider) throw 'provider_model';
           if (kind === 'mp4') {
@@ -1083,9 +1042,9 @@ export default function App() {
     finally { workflowAbort.current = undefined; setWorkflowBusy(false); }
   }
 
-  async function runAssistantDatasetCommand(id: string, request: string, plan: OfficeCommandPlan) {
+  async function runAssistantDatasetCommand(id: string, request: string, plan: OfficeCommandPlan, agent: AgentConnection) {
     if (plan.kind !== 'report') return false;
-    const completed = await runOfficeCommand(id, request, plan);
+    const completed = await runOfficeCommand(id, request, plan, agent);
     if (completed) {
       setReportSettingsOpen(false);
       setPage('current');
@@ -1120,11 +1079,11 @@ export default function App() {
     await polishDraft(draft, result);
   }
 
-  async function polishDraft(original: SavedReport, data: Analysis, instructions = '') {
+  async function polishDraft(original: SavedReport, data: Analysis, instructions = '', agent = defaultAgent) {
     const { payload, evidence: items } = codexInput(original.report, data, instructions);
     setPolishing(true);
     try {
-      const narrative = await polishReport(payload, original.report.settings.locale, agentEngine);
+      const narrative = await polishReport(payload, original.report.settings.locale, agent.engine);
       const refs = new Set(items.map(item => item.id));
       const output = Object.values(narrative).join('\n');
       if (!output.trim() || Array.from(output.matchAll(/\[([TD]\d+)\]/g)).some(match => !refs.has(match[1]!))) throw 'codex_output';
@@ -1135,7 +1094,7 @@ export default function App() {
       return next;
     } catch (error) {
       if (errorCode(error) === 'codex_cancelled') message.info(t('codexStopped'));
-      else message.error(trError(error, 'codex_failed'));
+      else message.error(trError(error, 'codex_failed', agent.name));
       return false;
     } finally { setPolishing(false); }
   }
@@ -1513,8 +1472,8 @@ export default function App() {
             }} openArtifacts={() => { setArtifactFilter(undefined); setPage('artifacts'); }} />
         </div>
         <div hidden={page !== 'assistant'}>
-          <OfficeAssistant files={loaded} hasCodex={hasCodex && !workflowBusy && !polishing && !creativeBusy && !datasetStage} running={assistantRunning} setRunning={setAssistantRunning} setWriting={setAssistantWriting}
-            engine={agentEngine} engineName={engineName} engineOptions={engineOptions} changeEngine={selectAgentEngine} engineLocked={workspaceLocked}
+          <OfficeAssistant files={loaded} agentBusy={workflowBusy || polishing || creativeBusy || Boolean(datasetStage)} running={assistantRunning} setRunning={setAssistantRunning} setWriting={setAssistantWriting}
+            defaultEngine={agentEngine} engineOptions={engineOptions} engineLocked={workspaceLocked} resolveAgent={resolveAgent} prepareEngine={checkCli} recheckEngine={recheck}
             openAgentSettings={() => setAgentSettingsOpen(true)} knowledgeModels={knowledgeModels}
             openKnowledge={(scope, attach) => setAssistantKnowledge({ scope, attach })}
             renderTaskContext={({ dataset, filenames, retrievalActive, locked, showScope }) => <TaskScopePicker profiles={profiles} dataset={dataset}
@@ -1533,7 +1492,6 @@ export default function App() {
             runDatasetCommand={runAssistantDatasetCommand} datasetCommandBusy={pptLocked}
             openTaskId={openTaskId} clearOpenTask={() => setOpenTaskId(undefined)} onTasksChange={setAssistantTasks}
             reference={assistantReference} clearReference={() => setAssistantReference(undefined)} showSourcesLoading={busy || picking}
-            engineStatus={engineStatus}
             pick={folder => { if (!locked) void pick(folder, 'assistant'); }} previewMaterial={id => setPreview({ type: 'material', id })}
             artifacts={artifacts} deliver={deliverArtifacts} preview={id => setPreview({ type: 'artifact', id })}
             saveFile={exportArtifact} exporting={exporting} show={setEvidence}
@@ -1719,7 +1677,7 @@ export default function App() {
     {backupOpen && <WorkspaceBackup close={() => setBackupOpen(false)} />}
     <AgentSettings open={agentSettingsOpen} engine={agentEngine} status={engineStatus} details={engineDetails}
       profiles={providerProfiles} locked={workspaceLocked} close={() => setAgentSettingsOpen(false)} changeEngine={selectAgentEngine}
-      recheck={recheckEngine} manageProviders={() => { setAgentSettingsOpen(false); setPage('models'); }} />
+      recheck={() => recheck(agentEngine)} manageProviders={() => { setAgentSettingsOpen(false); setPage('models'); }} />
     {assistantKnowledge && <DatasetSearch key={assistantKnowledge.scope.id} datasetId={assistantKnowledge.scope.id}
       name={assistantKnowledge.scope.name} files={loaded.filter(file => assistantKnowledge.scope.materialIds.includes(file.material.id))}
       copy={i18n.language === 'zh-CN' ? dataWorkbenchZh : dataWorkbenchEn} models={knowledgeModels}

@@ -225,7 +225,8 @@
 .assistant-memory-preview p { margin: 0; white-space: pre-wrap; }
 .assistant-answer-meta { margin-block-end: 7px; }
 .assistant-answer-meta strong { color: var(--assistant-muted); font-size: 12px; font-weight: 650; }
-.assistant-answer-meta > span:last-child { color: var(--assistant-muted); font-size: 11px; }
+.assistant-reply-model { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.assistant-incomplete { color: #885c2a; font-size: 11px; }
 .assistant-answer-mark { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 7px; color: var(--assistant-accent); background: var(--assistant-tint); font-size: 13px; }
 .assistant-thread .task-draft { padding: 17px clamp(14px, 2.3vw, 24px) 20px; border: 1px solid var(--assistant-line); border-radius: 12px; box-shadow: 0 2px 5px #233c3010; }
 .assistant-result-heading { align-items: center; gap: 8px 14px; }

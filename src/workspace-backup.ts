@@ -1,4 +1,4 @@
-import { FILE_LIMIT, ZIP_LIMIT } from './desktop';
+import { FILE_LIMIT, isAgentEngine, ZIP_LIMIT } from './desktop';
 import { sections } from './domain';
 import type { Artifact } from './office';
 import { isSlideMetadata, isSlideProject } from './slide-library';
@@ -9,7 +9,6 @@ import { validToolDraft } from './tool-draft';
 import { validTableAnalysis } from './table-analysis';
 import { validCreativeProject } from './creative-project';
 import { validWorkflows } from './office-workflows';
-import { isProviderEngine } from './provider-client';
 
 const format = 'Office Workspace Backup';
 const version = 4;
@@ -66,6 +65,7 @@ function agentChanges(value: unknown) {
 function draft(value: unknown) {
   return isObject(value) && isLocale(value.language) && isChoice(value.format, ['answer', 'docx', 'pptx', 'bundle'])
     && isOptional(value.reply, isBool) && isOptional(value.deniedTools, isCount) && isOptional(value.changes, agentChanges)
+    && isOptional(value.model, isSet)
     && isList(value.refs, evidence) && isObject(value.value) && isText(value.value.title)
     && isList(value.value.sections, part => isObject(part) && textFields(part, ['heading', 'text']));
 }
@@ -83,6 +83,9 @@ function task(value: unknown) {
   return taskInputs(value) && isSet(value.id) && isTime(value.updatedAt) && isBool(value.revise) && isOptional(value.draft, draft)
     && isOptional(value.conversationTitle, isSet) && isOptional(value.conversationPinnedAt, isTime)
     && isOptional(value.submittedRequest, isText) && isOptional(value.failedChanges, agentChanges)
+    && isOptional(value.engine, isAgentEngine)
+    && isOptional(value.interruptedReply, reply => isObject(reply) && isSet(reply.request) && isSet(reply.model)
+      && isSet(reply.text) && reply.text.length <= 50_000)
     && isChoice(value.status, ['idle', 'running', 'complete', 'failed', 'interrupted'])
     && isOptional(value.delivery, isText) && isOptional(value.error, isText) && isOptional(value.deliveryError, isText)
     && isOptional(value.retryKinds, kinds => isList(kinds, kind => isChoice(kind, ['docx', 'pptx'])))
@@ -157,7 +160,7 @@ function preferences(value: unknown) {
     'dataset-scans': entry => objectValues(entry, datasetScan),
     'office-commands': entry => Array.isArray(entry) && entry.length <= 32 && entry.every(command => isObject(command)
       && isSet(command.id) && isSet(command.name) && command.name.length <= 60 && isSet(command.request) && command.request.length <= 1200),
-    'agent-engine': entry => isChoice(entry, ['codex', 'claude']) || isProviderEngine(entry),
+    'agent-engine': isAgentEngine,
     'office-workflows': validWorkflows,
   };
   return preferenceNames.every(name => isOptional(values[name], checks[name]));

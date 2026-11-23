@@ -2,7 +2,7 @@ import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { materialKinds } from './domain';
 import type { Issue, Loaded, Material, MaterialKind, Narrative, Parsed, Report, Source } from './domain';
 import type { OfficeDraft } from './office';
-import { providerChat, providerDraft, providerReport, providerTarget } from './provider-client';
+import { isProviderEngine, providerChat, providerDraft, providerReport, providerTarget } from './provider-client';
 import type { ProviderEngine } from './provider-client';
 
 export const nativeDesktop = isTauri();
@@ -190,6 +190,9 @@ export async function loadMaterials(sources: Source[], progress: (count: number)
 export type NativeAgent = 'codex' | 'claude';
 export type AgentEngine = NativeAgent | ProviderEngine;
 export type AgentOptionGroup = { label: string; options: { value: AgentEngine; label: string }[] };
+export function isAgentEngine(value: unknown): value is AgentEngine {
+  return value === 'codex' || value === 'claude' || isProviderEngine(value);
+}
 export interface AgentFolder { id: string; path: string }
 export interface AgentWorkspaceChanges {
   folderId: string;

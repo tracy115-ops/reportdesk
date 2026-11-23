@@ -1,8 +1,10 @@
+import type { AgentEngine } from './desktop';
+
 export const stepKinds = ['draft', 'report', 'docx', 'pptx', 'html', 'pdf', 'png', 'mp3', 'mp4', 'mcp'] as const;
 export type WorkflowKind = typeof stepKinds[number];
 export interface WorkflowStep { id: string; kind: WorkflowKind; instructions: string; server?: string; tool?: string; continueOnError?: boolean }
 export interface OfficeWorkflow { id: string; name: string; triggers: string; steps: WorkflowStep[] }
-export interface WorkflowRun { workflow: OfficeWorkflow; datasetId?: string; request: string; token: string }
+export interface WorkflowRun { workflow: OfficeWorkflow; datasetId?: string; request: string; token: string; engine?: AgentEngine }
 export interface WorkflowStepResult { text: string; files?: string[] }
 type StepState = 'pending' | 'running' | 'ok' | 'failed' | 'skipped';
 export type StepUpdate = (id: string, state: StepState, text?: string) => void;

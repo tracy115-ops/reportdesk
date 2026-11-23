@@ -5,7 +5,7 @@ import { archiveKey } from './report-snapshot';
 import { readLocal } from './storage';
 import type { SlideAsset } from './slide-library';
 import type { CreativeProject } from './creative-project';
-import type { AgentFolder, AgentWorkspaceChanges } from './desktop';
+import type { AgentEngine, AgentFolder, AgentWorkspaceChanges } from './desktop';
 
 export interface OfficeDraft { title: string; sections: { heading: string; text: string }[] }
 export interface Artifact { id: string; title: string; kind: ArtifactKind; file: Blob; createdAt: string; detail: string; savedPath?: string; group?: string }
@@ -325,7 +325,7 @@ export async function deleteReportArchive(id: string) { await transaction('repor
 
 export type Format = 'answer' | 'docx' | 'pptx' | 'bundle';
 export type AssistantRetrieval = 'attachments' | 'keyword' | 'hybrid';
-export type AssistantDraft = { value: OfficeDraft; language: Locale; refs: Evidence[]; format: Format; reply?: boolean; deniedTools?: number; changes?: AgentWorkspaceChanges };
+export type AssistantDraft = { value: OfficeDraft; language: Locale; refs: Evidence[]; format: Format; reply?: boolean; deniedTools?: number; changes?: AgentWorkspaceChanges; model?: string };
 export interface AssistantTask {
   id: string;
   conversationTitle?: string;
@@ -338,12 +338,14 @@ export interface AssistantTask {
   dataset?: AssistantDatasetScope;
   retrieval?: AssistantRetrieval;
   agentFolder?: AgentFolder;
+  engine?: AgentEngine;
   locale: Locale;
   format: Format;
   draft?: AssistantDraft;
   status: 'idle' | 'running' | 'complete' | 'failed' | 'interrupted';
   error?: string;
   failedChanges?: AgentWorkspaceChanges;
+  interruptedReply?: { request: string; text: string; model: string };
   delivery?: string;
   deliveryError?: string;
   retryKinds?: ('docx' | 'pptx')[];
